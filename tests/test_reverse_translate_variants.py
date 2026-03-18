@@ -1655,3 +1655,50 @@ def test_batch_mode_accepts_csv_input_format(runner: CliRunner, tmp_path: Path) 
     assert rows[0]["transcript"] == "NM_A.1"
     assert rows[1]["transcript"] == "NM_B.1"
     assert rows[1]["variant_type"] == ""
+
+
+def test_batch_mode_honors_csv_field_size_limit_option(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {
+                "transcript": "NM_A.1",
+                "hgvs_p": "p.Arg2His",
+                "note": "X" * 200,
+            }
+        ],
+        fieldnames=["transcript", "hgvs_p", "note"],
+    )
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>G",
+                    "hgvs_g": "NC_000001.11:g.100A>G",
+                }
+            ],
+        ),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--csv-field-size-limit",
+                "50",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, csv.Error)
+    assert "field larger than field limit" in str(result.exception)

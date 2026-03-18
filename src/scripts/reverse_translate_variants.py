@@ -884,6 +884,15 @@ def join_variant_rows(
 	}
 
 
+def configure_csv_field_size_limit(field_size_limit: int) -> None:
+	try:
+		csv.field_size_limit(field_size_limit)
+	except OverflowError as exception:
+		raise click.ClickException(
+			f"Invalid --csv-field-size-limit value {field_size_limit}: exceeds platform maximum."
+		) from exception
+
+
 def reverse_translate_batch_rows(
 	rows: Iterable[Mapping[str, Any]],
 	transcript_column: str,
@@ -1122,6 +1131,13 @@ def reverse_translate_batch_rows(
 	type=str,
 	help="Delimiter used to join multiple variant_type/hgvs_c/hgvs_g values with --one-row-per-input.",
 )
+@click.option(
+	"--csv-field-size-limit",
+	default=csv.field_size_limit(),
+	show_default=True,
+	type=click.IntRange(min=1),
+	help="Maximum per-field character length for CSV/TSV parsing in batch mode.",
+)
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Optional TSV output path.")
 @click.option(
 	"--errors",
@@ -1154,12 +1170,14 @@ def main(
 	allow_length_changing_stop_candidates: bool,
 	one_row_per_input: bool,
 	join_delimiter: str,
+	csv_field_size_limit: int,
 	output: Path | None,
 	errors_output: Path | None,
 ) -> None:
 	from dotenv import load_dotenv
 
 	load_dotenv()
+	configure_csv_field_size_limit(csv_field_size_limit)
 
 	uniprot_target = uniprot_target.lower()
 	input_format = input_format.lower()

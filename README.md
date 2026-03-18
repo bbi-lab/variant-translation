@@ -259,6 +259,7 @@ python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs
 - `--max-indel-size`: Maximum insertion/deletion size in nucleotides (1-3)
 - `--limit`: Batch mode only; process at most the first N input rows
 - `--input-format`: Batch input format: `tsv` (default) or `csv`
+- `--csv-field-size-limit`: Batch mode parser field-length limit (default: current Python `csv` module limit)
 - `--pass-through-all-columns`: Batch mode; pass through all additional non-core input columns
 - `--pass-through-columns`: Batch mode; pass through specific additional column(s) (comma-separated and repeatable)
 - `--pass-through-prefix`: Batch mode; prefix for passed-through additional column names
@@ -328,6 +329,12 @@ To write warning/error rows (for example, failed reverse translation rows) to a 
 
 ```bash
 python -m src.scripts.reverse_translate_variants --input input.tsv --output output.tsv --errors errors.tsv
+```
+
+If your batch input has unusually long fields, increase the parser limit:
+
+```bash
+python -m src.scripts.reverse_translate_variants --input input.tsv --csv-field-size-limit 1000000 --output output.tsv
 ```
 
 In UniProt batch mode, the script processes input rows as a stream and resolves UniProt IDs on demand, caching
