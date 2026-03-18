@@ -70,6 +70,136 @@ Enumerate DNA variants that produce a requested protein HGVS change:
 If installed from PyPI, use the `reverse-translate-variants` command in place of
 `python -m src.scripts.reverse_translate_variants`.
 
+#### Programmatic usage (without calling `main`)
+
+You can call the core reverse-translation function directly from Python and reuse initialized HGVS/UTA objects
+across multiple variants:
+
+```python
+import hgvs.assemblymapper
+import hgvs.dataproviders.uta
+import hgvs.parser
+
+from src.scripts.reverse_translate_variants import (
+   auto_format_hgvs_p_string,
+   join_variant_rows,
+   reverse_translate_batch_rows,
+   reverse_translate_hgvs_p,
+)
+
+data_provider = hgvs.dataproviders.uta.connect()
+parser = hgvs.parser.Parser()
+mapper = hgvs.assemblymapper.AssemblyMapper(
+   data_provider,
+   assembly_name="GRCh38",
+   alt_aln_method="splign",
+   normalize=True,
+)
+
+transcript_cache: dict[str, tuple[str, str]] = {}
+
+hgvs_p = auto_format_hgvs_p_string("R175H")
+rows = reverse_translate_hgvs_p(
+   transcript_accession="NM_000546.6",
+   hgvs_protein=hgvs_p,
+   include_indels=True,
+   max_indel_size=3,
+   strict_ref_aa=True,
+   use_inv_notation=False,
+   allow_length_changing_stop_candidates=True,
+   parser=parser,
+   mapper=mapper,
+   data_provider=data_provider,
+   transcript_cache=transcript_cache,
+)
+
+print(rows[0])
+# {'variant_type': 'snv', 'hgvs_c': 'NM_000546.6:c....', 'hgvs_g': 'NC_...:g....'}
+
+# Optional: produce one-row-per-input style joined fields
+joined = join_variant_rows(rows, join_delimiter="|")
+print(joined)
+```
+
+#### Programmatic batch loop (without calling CLI `main`)
+
+For batch processing, use `reverse_translate_batch_rows(...)` to process row iterables directly. Initialize
+UTA/HGVS once and reuse `parser`, `mapper`, and `transcript_cache` for every row:
+
+```python
+import csv
+
+import hgvs.assemblymapper
+import hgvs.dataproviders.uta
+import hgvs.parser
+
+from src.scripts.reverse_translate_variants import (
+   reverse_translate_batch_rows,
+)
+
+data_provider = hgvs.dataproviders.uta.connect()
+parser = hgvs.parser.Parser()
+mapper = hgvs.assemblymapper.AssemblyMapper(
+   data_provider,
+   assembly_name="GRCh38",
+   alt_aln_method="splign",
+   normalize=True,
+)
+
+transcript_cache: dict[str, tuple[str, str]] = {}
+
+with open("input.csv", newline="") as in_handle:
+    reader = csv.DictReader(in_handle)
+    output_rows = reverse_translate_batch_rows(
+        rows=reader,
+        transcript_column="Ref_seq_transcript_ID",
+        hgvs_p_column="hgvs_p",
+        include_indels=True,
+        max_indel_size=3,
+        strict_ref_aa=True,
+        use_inv_notation=True,
+        allow_length_changing_stop_candidates=False,
+        parser=parser,
+        mapper=mapper,
+        data_provider=data_provider,
+        transcript_cache=transcript_cache,
+        auto_format_hgvs_p=True,
+        one_row_per_input=True,
+        join_delimiter="^",
+        skip_missing_hgvs_p=False,
+    )
+
+with open("output.tsv", "w", newline="") as out_handle:
+    output_columns = [
+        "ID",
+        "Dataset",
+        "Gene",
+        "Ref_seq_transcript_ID",
+        "hgvs_p",
+        "variant_type",
+        "hgvs_c",
+        "hgvs_g",
+    ]
+    writer = csv.DictWriter(out_handle, fieldnames=output_columns, delimiter="\t")
+    writer.writeheader()
+    writer.writerows(output_rows)
+```
+
+`reverse_translate_batch_rows(...)` options mirror key CLI behavior:
+- `one_row_per_input` + `join_delimiter`: same output shape as `--one-row-per-input` / `--join-delimiter`
+- `auto_format_hgvs_p`: same behavior as `--auto-format-hgvs-p`
+- `skip_missing_hgvs_p`: default `True` (CLI-like skip behavior), set `False` to emit blank variant fields
+- `raise_on_error`: default `False`; set `True` for fail-fast pipelines that should stop on the first
+   reverse-translation error
+
+Useful functions:
+- `reverse_translate_hgvs_p(...)`: core reverse-translation function returning candidate rows with
+   `variant_type`, `hgvs_c`, and `hgvs_g`
+- `reverse_translate_batch_rows(...)`: batch helper for iterables of row dictionaries
+- `auto_format_hgvs_p_string(...)`: converts shorthand protein strings (e.g., `R175H`, `A334del`) to HGVS p. form
+- `join_variant_rows(...)`: joins multi-candidate output into single delimited fields (same behavior as
+   `--one-row-per-input`)
+
 > **Requires UTA.** This script connects to a UTA (Universal Transcript Archive) PostgreSQL database to look up
 > transcript sequences and map c. variants to g. variants. See [UTA Setup](#uta-universal-transcript-archive) in
 > the Configuration section.

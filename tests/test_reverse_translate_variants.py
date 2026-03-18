@@ -298,6 +298,109 @@ def test_join_variant_rows_keeps_aligned_counts() -> None:
     assert len(joined["hgvs_c"].split("|")) == len(joined["hgvs_g"].split("|"))
 
 
+def test_reverse_translate_batch_rows_one_row_per_input_programmatic_helper() -> None:
+    rows = [
+        {"id": "r1", "transcript": "NM_A.1", "hgvs_p": "R2H"},
+        {"id": "r2", "transcript": "NM_B.1", "hgvs_p": ""},
+        {"id": "r3", "transcript": "", "hgvs_p": "p.Gly2="},
+    ]
+
+    reverse_translate_calls: list[str] = []
+
+    def mocked_reverse_translate(**kwargs):
+        reverse_translate_calls.append(kwargs["hgvs_protein"])
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": "NM_A.1:c.10A>G",
+                "hgvs_g": "NC_000001.11:g.100A>G",
+            },
+            {
+                "variant_type": "delins",
+                "hgvs_c": "NM_A.1:c.10_11delinsTT",
+                "hgvs_g": "NC_000001.11:g.100_101delinsTT",
+            },
+        ]
+
+    with patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate):
+        output_rows = rtv.reverse_translate_batch_rows(
+            rows=rows,
+            transcript_column="transcript",
+            hgvs_p_column="hgvs_p",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=Mock(),
+            transcript_cache={},
+            auto_format_hgvs_p=True,
+            one_row_per_input=True,
+            join_delimiter="^",
+        )
+
+    assert reverse_translate_calls == ["p.R2H"]
+    assert len(output_rows) == 2
+    assert output_rows[0]["id"] == "r1"
+    assert output_rows[0]["variant_type"] == "snv^delins"
+    assert output_rows[0]["hgvs_c"] == "NM_A.1:c.10A>G^NM_A.1:c.10_11delinsTT"
+    assert output_rows[1]["id"] == "r3"
+    assert output_rows[1]["variant_type"] == ""
+
+
+def test_reverse_translate_batch_rows_can_keep_missing_hgvs_p_rows() -> None:
+    rows = [{"id": "r1", "transcript": "NM_A.1", "hgvs_p": ""}]
+
+    output_rows = rtv.reverse_translate_batch_rows(
+        rows=rows,
+        transcript_column="transcript",
+        hgvs_p_column="hgvs_p",
+        include_indels=False,
+        max_indel_size=3,
+        strict_ref_aa=True,
+        use_inv_notation=False,
+        allow_length_changing_stop_candidates=True,
+        parser=Mock(),
+        mapper=Mock(),
+        data_provider=Mock(),
+        transcript_cache={},
+        skip_missing_hgvs_p=False,
+    )
+
+    assert len(output_rows) == 1
+    assert output_rows[0]["id"] == "r1"
+    assert output_rows[0]["variant_type"] == ""
+    assert output_rows[0]["hgvs_c"] == ""
+    assert output_rows[0]["hgvs_g"] == ""
+
+
+def test_reverse_translate_batch_rows_can_raise_on_error() -> None:
+    rows = [{"id": "r1", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"}]
+
+    with patch(
+        "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+        side_effect=RuntimeError("boom"),
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            rtv.reverse_translate_batch_rows(
+                rows=rows,
+                transcript_column="transcript",
+                hgvs_p_column="hgvs_p",
+                include_indels=False,
+                max_indel_size=3,
+                strict_ref_aa=True,
+                use_inv_notation=False,
+                allow_length_changing_stop_candidates=True,
+                parser=Mock(),
+                mapper=Mock(),
+                data_provider=Mock(),
+                transcript_cache={},
+                raise_on_error=True,
+            )
+
+
 def test_batch_mode_pass_through_all_columns_with_prefix(runner: CliRunner, tmp_path: Path) -> None:
     input_path = tmp_path / "input.tsv"
     output_path = tmp_path / "output.tsv"

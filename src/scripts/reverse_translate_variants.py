@@ -58,7 +58,7 @@ from itertools import product
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
@@ -887,6 +887,88 @@ def join_variant_rows(
 	}
 
 
+def reverse_translate_batch_rows(
+	rows: Iterable[Mapping[str, Any]],
+	transcript_column: str,
+	hgvs_p_column: str,
+	include_indels: bool,
+	max_indel_size: int,
+	strict_ref_aa: bool,
+	use_inv_notation: bool,
+	allow_length_changing_stop_candidates: bool,
+	parser: hgvs.parser.Parser,
+	mapper: hgvs.assemblymapper.AssemblyMapper,
+	data_provider: Any,
+	transcript_cache: dict[str, tuple[str, str]],
+	*,
+	auto_format_hgvs_p: bool = False,
+	one_row_per_input: bool = False,
+	join_delimiter: str = "|",
+	skip_missing_hgvs_p: bool = True,
+	raise_on_error: bool = False,
+) -> list[dict[str, str]]:
+	"""
+	Reverse-translate a sequence of input rows without invoking the CLI.
+
+	Each input row should include at least transcript and HGVS p. columns. Output rows preserve
+	input columns and append/overwrite `variant_type`, `hgvs_c`, and `hgvs_g`.
+	"""
+	if not join_delimiter:
+		raise click.ClickException("join_delimiter cannot be empty.")
+
+	output_rows: list[dict[str, str]] = []
+
+	for row in rows:
+		row_dict = {str(key): "" if value is None else str(value) for key, value in row.items()}
+
+		row_transcript = (row_dict.get(transcript_column) or "").strip()
+		row_hgvs_p = (row_dict.get(hgvs_p_column) or "").strip()
+		if auto_format_hgvs_p:
+			row_hgvs_p = auto_format_hgvs_p_string(row_hgvs_p)
+
+		if not row_hgvs_p:
+			if skip_missing_hgvs_p:
+				continue
+			output_rows.append({**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+			continue
+
+		if not row_transcript:
+			output_rows.append({**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+			continue
+
+		try:
+			variant_rows = reverse_translate_hgvs_p(
+				transcript_accession=row_transcript,
+				hgvs_protein=row_hgvs_p,
+				include_indels=include_indels,
+				max_indel_size=max_indel_size,
+				strict_ref_aa=strict_ref_aa,
+				use_inv_notation=use_inv_notation,
+				allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
+				parser=parser,
+				mapper=mapper,
+				data_provider=data_provider,
+				transcript_cache=transcript_cache,
+			)
+		except Exception:
+			if raise_on_error:
+				raise
+			output_rows.append({**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+			continue
+
+		if variant_rows:
+			if one_row_per_input:
+				joined_fields = join_variant_rows(variant_rows, join_delimiter=join_delimiter)
+				output_rows.append({**row_dict, **joined_fields})
+			else:
+				for variant_row in variant_rows:
+					output_rows.append({**row_dict, **variant_row})
+		else:
+			output_rows.append({**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+
+	return output_rows
+
+
 @click.command()
 @click.option("--transcript", "transcript_accession", required=False, type=str, help="Coding transcript accession.")
 @click.option(
@@ -1316,9 +1398,10 @@ def main(
 				continue
 
 			try:
-				row_variants = reverse_translate_hgvs_p(
-					transcript_accession=row_transcript,
-					hgvs_protein=row_hgvs_p,
+				translated_rows = reverse_translate_batch_rows(
+					rows=[{transcript_column: row_transcript, hgvs_p_column: row_hgvs_p}],
+					transcript_column=transcript_column,
+					hgvs_p_column=hgvs_p_column,
 					include_indels=include_indels,
 					max_indel_size=max_indel_size,
 					strict_ref_aa=strict_ref_aa,
@@ -1328,6 +1411,11 @@ def main(
 					mapper=mapper,
 					data_provider=data_provider,
 					transcript_cache=transcript_cache,
+					auto_format_hgvs_p=False,
+					one_row_per_input=one_row_per_input,
+					join_delimiter=join_delimiter,
+					skip_missing_hgvs_p=False,
+					raise_on_error=True,
 				)
 			except Exception as exception:
 				click.echo(
@@ -1339,32 +1427,23 @@ def main(
 				total_output_rows += 1
 				continue
 
-			if row_variants:
+			has_variants = any(
+				translated_row.get("variant_type") or translated_row.get("hgvs_c") or translated_row.get("hgvs_g")
+				for translated_row in translated_rows
+			)
+
+			if has_variants:
 				total_rows_with_variants += 1
-				if one_row_per_input:
-					joined_fields = join_variant_rows(row_variants, join_delimiter=join_delimiter)
-					writer.writerow(
-						{
-							**row_output_template,
-							"variant_type": joined_fields["variant_type"],
-							"hgvs_c": joined_fields["hgvs_c"],
-							"hgvs_g": joined_fields["hgvs_g"],
-						}
-					)
-					total_output_rows += 1
-				else:
-					for row_variant in row_variants:
-						writer.writerow(
-							{
-								**row_output_template,
-								"variant_type": row_variant["variant_type"],
-								"hgvs_c": row_variant["hgvs_c"],
-								"hgvs_g": row_variant["hgvs_g"],
-							}
-						)
-						total_output_rows += 1
-			else:
-				writer.writerow({**row_output_template, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+
+			for translated_row in translated_rows:
+				writer.writerow(
+					{
+						**row_output_template,
+						"variant_type": translated_row.get("variant_type", ""),
+						"hgvs_c": translated_row.get("hgvs_c", ""),
+						"hgvs_g": translated_row.get("hgvs_g", ""),
+					}
+				)
 				total_output_rows += 1
 
 		if total_rows_skipped_missing_hgvs_p > 0:
