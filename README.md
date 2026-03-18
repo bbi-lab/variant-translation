@@ -1,5 +1,28 @@
 # variant-translation: Tools for translating representations of genetic variants
 
+## Overview
+
+`variant-translation` provides Python and CLI workflows for translating and comparing
+HGVS variant representations in large datasets.
+
+At a high level, this repository includes:
+
+- **Reverse translation**: convert protein HGVS changes (`hgvs_p`) into candidate
+   coding and genomic variants (`hgvs_c`, `hgvs_g`) using transcript-aware mapping.
+- **File comparison**: compare two reverse-translated result files and report rows
+   unique to each file plus rows with differing variant outputs.
+- **Batch utilities**: stream-friendly TSV/CSV processing features (skip/limit,
+   pass-through columns, one-row-per-input output, error-row capture) for
+   production-scale pipelines.
+
+The packaged CLI entry points are:
+
+- `reverse-translate-variants`
+- `compare-reverse-translated-variants`
+
+The repository also contains small standalone helper scripts under `scripts/` for
+one-off data wrangling tasks.
+
 ## Installation
 
 ### Prerequisites
