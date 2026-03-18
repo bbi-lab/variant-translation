@@ -57,6 +57,7 @@ def test_reverse_translate_hgvs_p_with_mocked_data_provider() -> None:
             max_indel_size=3,
             strict_ref_aa=True,
             use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -87,6 +88,7 @@ def test_reverse_translate_non_snv_substitution_includes_triplet_delins() -> Non
             max_indel_size=3,
             strict_ref_aa=True,
             use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -118,6 +120,7 @@ def test_reverse_translate_prefers_minimal_two_nt_delins_over_full_codon_replace
             max_indel_size=3,
             strict_ref_aa=True,
             use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -148,6 +151,7 @@ def test_reverse_translate_can_emit_inv_for_full_codon_inversion() -> None:
             max_indel_size=3,
             strict_ref_aa=True,
             use_inv_notation=True,
+            allow_length_changing_stop_candidates=True,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -176,6 +180,7 @@ def test_reverse_translate_can_emit_inv_for_minimized_two_nt_inversion() -> None
             max_indel_size=3,
             strict_ref_aa=True,
             use_inv_notation=True,
+            allow_length_changing_stop_candidates=True,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -184,6 +189,98 @@ def test_reverse_translate_can_emit_inv_for_minimized_two_nt_inversion() -> None
 
     assert any(row["variant_type"] == "inv" and row["hgvs_c"] == "NM_TEST.1:c.2_3inv" for row in rows)
     assert not any(row["hgvs_c"] == "NM_TEST.1:c.2_3delinsAG" for row in rows)
+
+
+def test_reverse_translate_premature_stop_includes_length_changing_candidates_by_default() -> None:
+    insertion_data_provider = Mock()
+    insertion_data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    insertion_data_provider.get_seq.return_value = "TTTGCT"  # Phe Ala
+
+    deletion_data_provider = Mock()
+    deletion_data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    deletion_data_provider.get_seq.return_value = "TTTTAA"  # Phe Stop
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        insertion_rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_INS.1",
+            hgvs_protein="p.Phe1Ter",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=insertion_data_provider,
+            transcript_cache={},
+        )
+        deletion_rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_DEL.1",
+            hgvs_protein="p.Phe1Ter",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=deletion_data_provider,
+            transcript_cache={},
+        )
+
+    assert any(row["variant_type"] == "insertion" and row["hgvs_c"] == "NM_INS.1:c.1_2insAAA" for row in insertion_rows)
+    assert any(row["variant_type"] == "deletion" and row["hgvs_c"] == "NM_DEL.1:c.1_3del" for row in deletion_rows)
+
+
+def test_reverse_translate_premature_stop_can_restrict_to_substitutions_and_same_length_delins() -> None:
+    insertion_data_provider = Mock()
+    insertion_data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    insertion_data_provider.get_seq.return_value = "TTTGCT"  # Phe Ala
+
+    deletion_data_provider = Mock()
+    deletion_data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    deletion_data_provider.get_seq.return_value = "TTTTAA"  # Phe Stop
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        insertion_rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_INS.1",
+            hgvs_protein="p.Phe1Ter",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=False,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=insertion_data_provider,
+            transcript_cache={},
+        )
+        deletion_rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_DEL.1",
+            hgvs_protein="p.Phe1Ter",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=False,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=deletion_data_provider,
+            transcript_cache={},
+        )
+
+    assert insertion_rows
+    assert any(row["variant_type"] == "delins" and row["hgvs_c"] == "NM_INS.1:c.2_3delinsAA" for row in insertion_rows)
+    assert not any(row["variant_type"] == "insertion" for row in insertion_rows)
+    assert not any(row["variant_type"] == "deletion" for row in insertion_rows)
+    assert not any(row["variant_type"] == "insertion" for row in deletion_rows)
+    assert not any(row["variant_type"] == "deletion" for row in deletion_rows)
 
 
 def test_join_variant_rows_keeps_aligned_counts() -> None:

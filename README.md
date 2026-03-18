@@ -76,12 +76,20 @@ To express eligible reverse-complement replacements as HGVS inversions (`inv`) i
 python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs-p p.Arg175His --include-indels --use-inv-notation
 ```
 
+To restrict premature-stop reverse translation to substitutions and same-length `delins` variants, excluding
+length-changing insertion/deletion candidates:
+
+```bash
+python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs-p p.Arg175Ter --include-indels --substitutions-and-delins-only
+```
+
 **Key options:**
 - `--assembly`: Genome assembly for HGVS g. projection (default: `GRCh38`)
 - `--uniprot-id`: Resolve UniProt accession to a MANE Select identifier for single-variant mode
 - `--uniprot-target`: UniProt MANE identifier source: `refseq-protein` (default) or `ensembl-transcript`
 - `--include-indels`: Include codon-local insertion/deletion/delins candidates
 - `--use-inv-notation`: Express eligible reverse-complement delins as HGVS `inv` variants
+- `--substitutions-and-delins-only`: For premature stops, suppress length-changing insertion/deletion candidates
 - `--max-indel-size`: Maximum insertion/deletion size in nucleotides (1-3)
 - `--limit`: Batch mode only; process at most the first N input rows
 - `--input-format`: Batch input format: `tsv` (default) or `csv`

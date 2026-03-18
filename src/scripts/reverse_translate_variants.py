@@ -23,6 +23,19 @@ Examples:
 	--include-indels \
 	--output tp53_r175h_reverse_translation.tsv
 
+  # Premature-stop mode (default): allow length-changing codon-local indel candidates.
+  python -m src.scripts.reverse_translate_variants \
+	--transcript NM_000546.6 \
+	--hgvs-p p.Arg175Ter \
+	--include-indels
+
+  # Premature-stop mode (restricted): substitutions and same-length delins only.
+  python -m src.scripts.reverse_translate_variants \
+	--transcript NM_000546.6 \
+	--hgvs-p p.Arg175Ter \
+	--include-indels \
+	--substitutions-and-delins-only
+
   python -m src.scripts.reverse_translate_variants \
 	--input input.tsv \
 	--uniprot-column uniprot_id \
@@ -364,6 +377,21 @@ def is_frame_preserving_indel(deleted_length: int, inserted_length: int) -> bool
 	return (inserted_length - deleted_length) % 3 == 0
 
 
+def allows_stop_length_change_candidate(
+	protein_change: ProteinChange,
+	deleted_length: int,
+	inserted_length: int,
+	allow_length_changing_stop_candidates: bool,
+) -> bool:
+	if protein_change.alternate_aa != "*":
+		return True
+
+	if allow_length_changing_stop_candidates:
+		return True
+
+	return deleted_length == inserted_length
+
+
 def hgvs_c_for_delins_or_inv(
 	codon_c_start: int,
 	codon_offset: int,
@@ -420,12 +448,20 @@ def enumerate_indel_candidates(
 	protein_change: ProteinChange,
 	max_indel_size: int,
 	use_inv_notation: bool,
+	allow_length_changing_stop_candidates: bool,
 ) -> list[CandidateVariant]:
 	candidates: list[CandidateVariant] = []
 
 	# Pure insertions (internal to codon only): c.N_N+1insX
 	for codon_offset in (1, 2):
 		for inserted_length in range(1, max_indel_size + 1):
+			if not allows_stop_length_change_candidate(
+				protein_change,
+				deleted_length=0,
+				inserted_length=inserted_length,
+				allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
+			):
+				continue
 			if not is_frame_preserving_indel(deleted_length=0, inserted_length=inserted_length):
 				continue
 			for inserted_bases in product(DNA_BASES, repeat=inserted_length):
@@ -451,7 +487,12 @@ def enumerate_indel_candidates(
 			]
 
 			# Pure deletion
-			if is_frame_preserving_indel(deleted_length=deleted_length, inserted_length=0):
+			if allows_stop_length_change_candidate(
+				protein_change,
+				deleted_length=deleted_length,
+				inserted_length=0,
+				allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
+			) and is_frame_preserving_indel(deleted_length=deleted_length, inserted_length=0):
 				alternate_cds = apply_cds_edit(
 					coding_sequence,
 					codon_cds_start_index + codon_offset,
@@ -465,6 +506,13 @@ def enumerate_indel_candidates(
 
 			# Delins
 			for inserted_length in range(1, max_indel_size + 1):
+				if not allows_stop_length_change_candidate(
+					protein_change,
+					deleted_length=deleted_length,
+					inserted_length=inserted_length,
+					allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
+				):
+					continue
 				if not is_frame_preserving_indel(deleted_length=deleted_length, inserted_length=inserted_length):
 					continue
 				for inserted_bases in product(DNA_BASES, repeat=inserted_length):
@@ -709,6 +757,7 @@ def reverse_translate_hgvs_p(
 	max_indel_size: int,
 	strict_ref_aa: bool,
 	use_inv_notation: bool,
+	allow_length_changing_stop_candidates: bool,
 	parser: hgvs.parser.Parser,
 	mapper: hgvs.assemblymapper.AssemblyMapper,
 	data_provider: Any,
@@ -774,6 +823,7 @@ def reverse_translate_hgvs_p(
 					protein_change,
 					max_indel_size=max_indel_size,
 					use_inv_notation=use_inv_notation,
+					allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
 				)
 			)
 
@@ -953,6 +1003,14 @@ def join_variant_rows(
 	help="Express eligible reverse-complement delins as HGVS inv variants instead of delins.",
 )
 @click.option(
+	"--allow-length-changing-stop-candidates/--substitutions-and-delins-only",
+	default=True,
+	help=(
+		"For premature-stop reverse translation, either include length-changing codon-local indels "
+		"(default) or restrict output to substitutions and same-length delins."
+	),
+)
+@click.option(
 	"--one-row-per-input",
 	is_flag=True,
 	default=False,
@@ -989,6 +1047,7 @@ def main(
 	strict_ref_aa: bool,
 	auto_format_hgvs_p: bool,
 	use_inv_notation: bool,
+	allow_length_changing_stop_candidates: bool,
 	one_row_per_input: bool,
 	join_delimiter: str,
 	output: Path | None,
@@ -1059,6 +1118,7 @@ def main(
 			max_indel_size=max_indel_size,
 			strict_ref_aa=strict_ref_aa,
 			use_inv_notation=use_inv_notation,
+			allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
 			parser=parser,
 			mapper=mapper,
 			data_provider=data_provider,
@@ -1263,6 +1323,7 @@ def main(
 					max_indel_size=max_indel_size,
 					strict_ref_aa=strict_ref_aa,
 					use_inv_notation=use_inv_notation,
+					allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
 					parser=parser,
 					mapper=mapper,
 					data_provider=data_provider,
