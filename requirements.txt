@@ -1,6 +1,8 @@
+build
 black
 click
 hgvs
 pytest
 python-dotenv
 requests
+twine

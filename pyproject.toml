@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "variant-translation"
+version = "0.1.0"
+authors = [
+    { name="Jeremy Stone", email="74574922+jstone-dev@users.noreply.github.com" },
+]
+description = "Reverse-translate protein HGVS variants."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "click",
+    "hgvs",
+    "python-dotenv",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "pytest",
+]
+publish = [
+    "build",
+    "twine",
+]
+
+[project.scripts]
+reverse-translate-variants = "src.scripts.reverse_translate_variants:main"
+compare-reverse-translated-variants = "src.scripts.compare_reverse_translated_variants:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+namespaces = true
+
+[tool.variant-translation.build-instructions]
+build_command = "python -m build"
+check_command = "python -m twine check dist/*"
+upload_command = "python -m twine upload dist/*"

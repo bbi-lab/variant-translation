@@ -7,7 +7,31 @@
 - Python 3.8 or later
 - Virtual environment (recommended)
 
-### Setup
+### Option A: Install from PyPI (library + CLI)
+
+1. Create and activate a virtual environment:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # On macOS/Linux
+   # or
+   .venv\Scripts\activate  # On Windows
+   ```
+
+2. Install from PyPI:
+
+   ```bash
+   pip install variant-translation
+   ```
+
+3. Run installed CLI entry points:
+
+   ```bash
+   reverse-translate-variants --help
+   compare-reverse-translated-variants --help
+   ```
+
+### Option B: Install from GitHub source
 
 1. Clone this repository:
 
@@ -31,11 +55,20 @@
    pip install -r requirements.txt
    ```
 
+4. (Optional) Install as an editable package to use CLI entry points while developing:
+
+   ```bash
+   pip install -e .
+   ```
+
 ## Reverse-Translate Protein Variants
 
 ### `reverse_translate_variants.py`
 
 Enumerate DNA variants that produce a requested protein HGVS change:
+
+If installed from PyPI, use the `reverse-translate-variants` command in place of
+`python -m src.scripts.reverse_translate_variants`.
 
 > **Requires UTA.** This script connects to a UTA (Universal Transcript Archive) PostgreSQL database to look up
 > transcript sequences and map c. variants to g. variants. See [UTA Setup](#uta-universal-transcript-archive) in
@@ -198,6 +231,9 @@ codes; single stop codon changes (e.g., `*123C`); synonymous changes (e.g., `R17
 Compare two single-line reverse-translation files (A and B), matching rows by exact transcript + `hgvs_p` and
 reporting A-only keys, B-only keys, and rows where reverse translations differ.
 
+If installed from PyPI, use the `compare-reverse-translated-variants` command in place of
+`python -m src.scripts.compare_reverse_translated_variants`.
+
 ```bash
 python -m src.scripts.compare_reverse_translated_variants \
    --a-input a.tsv \
@@ -321,3 +357,69 @@ Key dependencies include:
 - **hgvs**: HGVS variant parsing and validation
 
 See [requirements.txt](requirements.txt) for the complete list.
+
+## Publish to PyPI
+
+From a clean, version-tagged working tree:
+
+Before building, bump `version` in `pyproject.toml`.
+
+### Release checklist
+
+- [ ] Bump `version` in `pyproject.toml`.
+- [ ] Ensure tests pass (`pytest`).
+- [ ] Rebuild distributions from a clean state (`rm -rf dist build *.egg-info`).
+- [ ] Build artifacts (`python -m build`).
+- [ ] Validate metadata (`python -m twine check dist/*`).
+- [ ] (Recommended) Upload and test install via TestPyPI.
+- [ ] Upload to PyPI (`python -m twine upload dist/*`).
+
+### One-command release targets
+
+This repository includes a `Makefile` with release targets that implement the checklist steps:
+
+```bash
+make release-prep        # test + clean + build + twine check
+make release-testpypi    # release-prep + upload to TestPyPI
+make release             # release-prep + upload to PyPI
+```
+
+1. Install publishing dependencies:
+
+   ```bash
+   pip install .[publish]
+   ```
+
+2. Build source and wheel distributions:
+
+   ```bash
+   python -m build
+   ```
+
+3. Validate distribution metadata:
+
+   ```bash
+   python -m twine check dist/*
+   ```
+
+4. Upload to PyPI:
+
+   ```bash
+   python -m twine upload dist/*
+   ```
+
+### TestPyPI dry-run (recommended before production upload)
+
+Use TestPyPI to validate packaging and installation without publishing to the main index:
+
+1. Upload to TestPyPI:
+
+   ```bash
+   python -m twine upload --repository testpypi dist/*
+   ```
+
+2. Install from TestPyPI in a clean virtual environment:
+
+   ```bash
+   pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple variant-translation
+   ```
