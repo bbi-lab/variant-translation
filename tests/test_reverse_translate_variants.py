@@ -401,6 +401,41 @@ def test_reverse_translate_batch_rows_can_raise_on_error() -> None:
             )
 
 
+def test_reverse_translate_batch_rows_can_collect_error_rows() -> None:
+    rows = [
+        {"id": "r1", "transcript": "", "hgvs_p": "p.Arg2His"},
+        {"id": "r2", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+    ]
+    error_rows: list[dict[str, str]] = []
+
+    with patch(
+        "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+        side_effect=RuntimeError("boom"),
+    ):
+        output_rows = rtv.reverse_translate_batch_rows(
+            rows=rows,
+            transcript_column="transcript",
+            hgvs_p_column="hgvs_p",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=Mock(),
+            transcript_cache={},
+            error_rows=error_rows,
+        )
+
+    assert len(output_rows) == 2
+    assert len(error_rows) == 2
+    assert error_rows[0]["id"] == "r1"
+    assert error_rows[0]["error"] == "Missing transcript value."
+    assert error_rows[1]["id"] == "r2"
+    assert error_rows[1]["error"] == "Failed reverse translation (boom)"
+
+
 def test_batch_mode_pass_through_all_columns_with_prefix(runner: CliRunner, tmp_path: Path) -> None:
     input_path = tmp_path / "input.tsv"
     output_path = tmp_path / "output.tsv"
@@ -940,6 +975,81 @@ def test_batch_mode_skip_is_applied_before_limit(runner: CliRunner, tmp_path: Pa
     assert rows[0]["transcript"] == "NM_B.1"
 
 
+def test_batch_mode_errors_file_writes_rows_with_error_messages(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "errors_input.tsv"
+    output_path = tmp_path / "errors_output.tsv"
+    errors_path = tmp_path / "errors.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row2", "transcript": "", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row3", "transcript": "NM_B.1", "hgvs_p": "p.Arg2His"},
+        ],
+        fieldnames=["sample_id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        if kwargs["transcript_accession"] == "NM_B.1":
+            raise RuntimeError("boom")
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.10A>G",
+                "hgvs_g": "NC_000001.11:g.100A>G",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--pass-through-all-columns",
+                "--output",
+                str(output_path),
+                "--errors",
+                str(errors_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        output_reader = csv.DictReader(handle, delimiter="\t")
+        output_rows = list(output_reader)
+
+    assert len(output_rows) == 3
+    assert output_rows[0]["sample_id"] == "row1"
+    assert output_rows[0]["variant_type"] == "snv"
+    assert output_rows[1]["sample_id"] == "row2"
+    assert output_rows[1]["variant_type"] == ""
+    assert output_rows[2]["sample_id"] == "row3"
+    assert output_rows[2]["variant_type"] == ""
+
+    with errors_path.open("r", newline="") as handle:
+        errors_reader = csv.DictReader(handle, delimiter="\t")
+        error_rows = list(errors_reader)
+
+    assert errors_reader.fieldnames is not None
+    assert "error" in errors_reader.fieldnames
+    assert len(error_rows) == 2
+    assert error_rows[0]["sample_id"] == "row2"
+    assert "missing transcript/UniProt-derived transcript" in error_rows[0]["error"]
+    assert error_rows[1]["sample_id"] == "row3"
+    assert "failed reverse translation (boom)" in error_rows[1]["error"]
+    assert "2 rows written to --errors file" in result.output
+
+
 def test_single_mode_rejects_skip_option(runner: CliRunner) -> None:
     result = runner.invoke(
         rtv.main,
@@ -955,6 +1065,25 @@ def test_single_mode_rejects_skip_option(runner: CliRunner) -> None:
 
     assert result.exit_code != 0
     assert "--skip is only supported with --input." in result.output
+
+
+def test_single_mode_rejects_errors_option(runner: CliRunner, tmp_path: Path) -> None:
+    errors_path = tmp_path / "errors.tsv"
+
+    result = runner.invoke(
+        rtv.main,
+        [
+            "--transcript",
+            "NM_TEST.1",
+            "--hgvs-p",
+            "p.Met1Val",
+            "--errors",
+            str(errors_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--errors is only supported with --input." in result.output
 
 
 def test_single_mode_one_row_per_input_joins_variants(runner: CliRunner) -> None:

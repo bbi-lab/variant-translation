@@ -903,6 +903,7 @@ def reverse_translate_batch_rows(
 	join_delimiter: str = "|",
 	skip_missing_hgvs_p: bool = True,
 	raise_on_error: bool = False,
+	error_rows: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
 	"""
 	Reverse-translate a sequence of input rows without invoking the CLI.
@@ -914,6 +915,11 @@ def reverse_translate_batch_rows(
 		raise click.ClickException("join_delimiter cannot be empty.")
 
 	output_rows: list[dict[str, str]] = []
+
+	def record_error_row(base_row: dict[str, str], error_message: str) -> None:
+		if error_rows is None:
+			return
+		error_rows.append({**base_row, "error": error_message})
 
 	for row in rows:
 		row_dict = {str(key): "" if value is None else str(value) for key, value in row.items()}
@@ -930,7 +936,9 @@ def reverse_translate_batch_rows(
 			continue
 
 		if not row_transcript:
-			output_rows.append({**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+			empty_row = {**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""}
+			output_rows.append(empty_row)
+			record_error_row(empty_row, "Missing transcript value.")
 			continue
 
 		try:
@@ -947,10 +955,12 @@ def reverse_translate_batch_rows(
 				data_provider=data_provider,
 				transcript_cache=transcript_cache,
 			)
-		except Exception:
+		except Exception as exception:
 			if raise_on_error:
 				raise
-			output_rows.append({**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+			empty_row = {**row_dict, "variant_type": "", "hgvs_c": "", "hgvs_g": ""}
+			output_rows.append(empty_row)
+			record_error_row(empty_row, f"Failed reverse translation ({exception})")
 			continue
 
 		if variant_rows:
@@ -1113,6 +1123,13 @@ def reverse_translate_batch_rows(
 	help="Delimiter used to join multiple variant_type/hgvs_c/hgvs_g values with --one-row-per-input.",
 )
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None, help="Optional TSV output path.")
+@click.option(
+	"--errors",
+	"errors_output",
+	type=click.Path(dir_okay=False, path_type=Path),
+	default=None,
+	help="Batch mode only: optional TSV output path for rows with warnings/errors, plus an error column.",
+)
 def main(
 	transcript_accession: str | None,
 	uniprot_id: str | None,
@@ -1138,6 +1155,7 @@ def main(
 	one_row_per_input: bool,
 	join_delimiter: str,
 	output: Path | None,
+	errors_output: Path | None,
 ) -> None:
 	from dotenv import load_dotenv
 
@@ -1169,6 +1187,8 @@ def main(
 			raise click.ClickException("--limit is only supported with --input.")
 		if skip != 0:
 			raise click.ClickException("--skip is only supported with --input.")
+		if errors_output is not None:
+			raise click.ClickException("--errors is only supported with --input.")
 
 		if auto_format_hgvs_p:
 			hgvs_protein = auto_format_hgvs_p_string(hgvs_protein)
@@ -1260,6 +1280,7 @@ def main(
 	batch_input_delimiter = "\t" if input_format == "tsv" else ","
 	input_handle = input_path.open("r", newline="")
 	output_handle = output.open("w", newline="") if output else click.get_text_stream("stdout")
+	errors_handle = errors_output.open("w", newline="") if errors_output else None
 
 	try:
 		reader = csv.DictReader(input_handle, delimiter=batch_input_delimiter)
@@ -1348,6 +1369,19 @@ def main(
 
 		writer = csv.DictWriter(output_handle, fieldnames=field_names, delimiter="\t")
 		writer.writeheader()
+		errors_writer: csv.DictWriter | None = None
+		total_rows_written_to_errors_file = 0
+		if errors_handle is not None:
+			errors_field_names = [*field_names, "error"]
+			errors_writer = csv.DictWriter(errors_handle, fieldnames=errors_field_names, delimiter="\t")
+			errors_writer.writeheader()
+
+		def write_error_row(row_data: Mapping[str, str], error_message: str) -> None:
+			nonlocal total_rows_written_to_errors_file
+			if errors_writer is None:
+				return
+			errors_writer.writerow({**row_data, "error": error_message})
+			total_rows_written_to_errors_file += 1
 
 		total_input_rows = 0
 		total_output_rows = 0
@@ -1372,6 +1406,7 @@ def main(
 
 			row_transcript = (row.get(transcript_column) or "").strip() if has_transcript_column else ""
 			row_uniprot_id = (row.get(uniprot_column) or "").strip() if has_uniprot_column and uniprot_column else ""
+			row_uniprot_resolution_error: str | None = None
 
 			if not row_transcript and row_uniprot_id:
 				if row_uniprot_id in resolved_transcript_by_uniprot_id:
@@ -1387,8 +1422,9 @@ def main(
 						resolved_transcript_by_uniprot_id[row_uniprot_id] = row_transcript
 					except Exception as exception:
 						failed_uniprot_ids.add(row_uniprot_id)
+						row_uniprot_resolution_error = f"Failed to resolve UniProt ID {row_uniprot_id} ({exception})."
 						click.echo(
-							f"Warning: Failed to resolve UniProt ID {row_uniprot_id} ({exception}).",
+							f"Warning: {row_uniprot_resolution_error}",
 							err=True,
 						)
 				if has_transcript_column:
@@ -1403,13 +1439,19 @@ def main(
 				continue
 
 			if not row_transcript:
+				error_message = (
+					f"Row {row_index} is missing transcript/UniProt-derived transcript; writing empty variant fields."
+				)
+				if row_uniprot_resolution_error is not None:
+					error_message = f"{row_uniprot_resolution_error} {error_message}"
 				click.echo(
-					f"Warning: Row {row_index} is missing transcript/UniProt-derived transcript; "
-					"writing empty variant fields.",
+					f"Warning: {error_message}",
 					err=True,
 				)
 				total_rows_with_errors += 1
-				writer.writerow({**row_output_template, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+				empty_output_row = {**row_output_template, "variant_type": "", "hgvs_c": "", "hgvs_g": ""}
+				writer.writerow(empty_output_row)
+				write_error_row(empty_output_row, error_message)
 				total_output_rows += 1
 				continue
 
@@ -1434,12 +1476,17 @@ def main(
 					raise_on_error=True,
 				)
 			except Exception as exception:
+				error_message = (
+					f"Row {row_index} failed reverse translation ({exception}); writing empty variant fields."
+				)
 				click.echo(
-					f"Warning: Row {row_index} failed reverse translation ({exception}); writing empty variant fields.",
+					f"Warning: {error_message}",
 					err=True,
 				)
 				total_rows_with_errors += 1
-				writer.writerow({**row_output_template, "variant_type": "", "hgvs_c": "", "hgvs_g": ""})
+				empty_output_row = {**row_output_template, "variant_type": "", "hgvs_c": "", "hgvs_g": ""}
+				writer.writerow(empty_output_row)
+				write_error_row(empty_output_row, error_message)
 				total_output_rows += 1
 				continue
 
@@ -1469,6 +1516,10 @@ def main(
 				err=True,
 			)
 
+		errors_file_summary_suffix = ""
+		if errors_writer is not None:
+			errors_file_summary_suffix = f", {total_rows_written_to_errors_file} rows written to --errors file"
+
 		click.echo(
 			"Batch reverse-translation summary: "
 			f"{total_input_rows} input rows, "
@@ -1476,13 +1527,15 @@ def main(
 			f"{total_output_rows} output rows, "
 			f"{total_rows_with_variants} rows with >=1 variant, "
 			f"{total_rows_with_errors} rows with warnings/errors, "
-			f"{total_rows_skipped_missing_hgvs_p} rows skipped for missing HGVS p..",
+			f"{total_rows_skipped_missing_hgvs_p} rows skipped for missing HGVS p.{errors_file_summary_suffix}.",
 			err=True,
 		)
 	finally:
 		input_handle.close()
 		if output:
 			output_handle.close()
+		if errors_handle is not None:
+			errors_handle.close()
 
 
 if __name__ == "__main__":

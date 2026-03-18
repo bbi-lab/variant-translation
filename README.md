@@ -191,6 +191,8 @@ with open("output.tsv", "w", newline="") as out_handle:
 - `skip_missing_hgvs_p`: default `True` (CLI-like skip behavior), set `False` to emit blank variant fields
 - `raise_on_error`: default `False`; set `True` for fail-fast pipelines that should stop on the first
    reverse-translation error
+- `error_rows`: optional list to collect rows that encountered errors; each entry includes the same
+   output columns plus an `error` message
 
 Useful functions:
 - `reverse_translate_hgvs_p(...)`: core reverse-translation function returning candidate rows with
@@ -263,6 +265,7 @@ python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs
 - `--one-row-per-input`: Emit exactly one output row per input row by joining multiple candidates
 - `--join-delimiter`: Delimiter used with `--one-row-per-input` (default: `|`)
 - `--output`: Write TSV output to a file (otherwise prints to stdout)
+- `--errors`: Batch mode only; write warning/error rows to a TSV file with an added `error` column
 
 **Batch mode (default TSV):**
 
@@ -318,6 +321,13 @@ lines 1 through 101 (header + first 100 records):
 
 ```bash
 python -m src.scripts.reverse_translate_variants --input input.tsv --skip 100 --output output.tsv
+```
+
+To write warning/error rows (for example, failed reverse translation rows) to a separate file with an
+`error` message column:
+
+```bash
+python -m src.scripts.reverse_translate_variants --input input.tsv --output output.tsv --errors errors.tsv
 ```
 
 In UniProt batch mode, the script processes input rows as a stream and resolves UniProt IDs on demand, caching
