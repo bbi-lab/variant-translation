@@ -329,6 +329,21 @@ length-changing insertion/deletion candidates:
 python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs-p p.Arg175Ter --include-indels --substitutions-and-delins-only
 ```
 
+**Representation notes**
+
+- For downstream use, it is still a good idea to pass generated variants through
+   [VariantValidator](https://variantvalidator.org/) or a similar HGVS-aware normalization/validation tool to confirm
+   canonical form. In current testing we have not observed generation of less-recommended representations, but
+   external validation remains recommended for production pipelines.
+- During c.→g. projection, if the affected codon spans an intron, the genomic expression may include an intronic
+   deletion segment. This can still be a valid reverse translation of the same coding effect. In these cases there are
+   often many genomic alternatives that reduce to the same c. variant, and it may be preferable to represent a
+   multi-variant/compound genomic change that alters only the coding bases on each side of the exon boundary.
+   - Toy pattern: a boundary-spanning genomic edit can appear as a single contiguous event
+     (`NC_...:g.<left>_<right>delins...`), while an alternative representation with the same coding consequence may be
+     a compound form (`NC_...:g.[<left_exonic_change>;<right_exonic_change>]`) that avoids explicitly deleting intronic
+     sequence.
+
 **Supported protein HGVS inputs**
 
 This tool currently accepts **single-amino-acid changes at one position**:
