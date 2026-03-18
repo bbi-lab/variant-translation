@@ -8,6 +8,11 @@ same protein-level change.
 
 Output is tab-separated with both HGVS c. and HGVS g. expressions.
 
+Mode requirements:
+	- Single mode (no --input): requires --hgvs-p plus exactly one of --transcript or --uniprot-id.
+	- Batch mode (--input): requires --hgvs-p-column and at least one transcript source column,
+		either --transcript-column and/or --uniprot-column.
+
 Examples:
   python -m src.scripts.reverse_translate_variants \
 	--transcript NM_000546.6 \
@@ -35,6 +40,12 @@ Examples:
 	--hgvs-p p.Arg175Ter \
 	--include-indels \
 	--substitutions-and-delins-only
+
+  python -m src.scripts.reverse_translate_variants \
+	--input input.tsv \
+	--transcript-column transcript \
+	--hgvs-p-column hgvs_p \
+	--output reverse_translation.tsv
 
   python -m src.scripts.reverse_translate_variants \
 	--input input.tsv \

@@ -23,6 +23,39 @@ The packaged CLI entry points are:
 The repository also contains small standalone helper scripts under `scripts/` for
 one-off data wrangling tasks.
 
+## Quick start
+
+After installing dependencies, run one of these examples:
+
+- Reverse translate a single protein variant:
+
+   ```bash
+   python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs-p p.Arg175His
+   ```
+
+- Reverse translate a batch TSV file:
+
+   ```bash
+   python -m src.scripts.reverse_translate_variants \
+       --input input.tsv \
+       --input-format tsv \
+       --hgvs-p-column hgvs_p \
+       --transcript-column transcript \
+       --output reverse_translated.tsv \
+       --errors reverse_translation_errors.tsv
+   ```
+
+- Compare two reverse-translated files:
+
+   ```bash
+   python -m src.scripts.compare_reverse_translated_variants \
+       --a-input a.tsv \
+       --b-input b.tsv \
+       --a-only-output a_only.tsv \
+       --b-only-output b_only.tsv \
+       --different-output differences.tsv
+   ```
+
 ## Installation
 
 ### Prerequisites
@@ -248,6 +281,31 @@ transcript directly (`uniProtKBCrossReferences[0].id`), set:
 python -m src.scripts.reverse_translate_variants --uniprot-id P04637 --hgvs-p p.Arg175His --uniprot-target ensembl-transcript
 ```
 
+**How transcript selection works**
+
+- **Single mode (`--input` not provided):** you must supply `--hgvs-p` and **exactly one** of
+   `--transcript` or `--uniprot-id`.
+- **Batch mode (`--input` provided):** the file must include `--hgvs-p-column` and at least one transcript source:
+   `--transcript-column` (default: `transcript`) and/or `--uniprot-column`.
+- If both transcript and UniProt columns exist, each row uses the transcript value when present; UniProt resolution is
+   used as a fallback when transcript is blank.
+- Rows with neither a transcript nor a resolvable UniProt-derived transcript are written with empty variant fields and
+   a warning (and can be captured in `--errors`).
+
+**Common transcript/UniProt mode errors**
+
+- `Single mode requires --hgvs-p.`
+   - Add `--hgvs-p p.<change>` when running without `--input`.
+- `Single mode requires exactly one of --transcript or --uniprot-id, plus --hgvs-p.`
+   - In single mode, pass only one transcript source: either `--transcript` or `--uniprot-id`.
+- `Missing transcript column in input ...` or `Missing transcript and UniProt columns in input ...`
+   - In batch mode, ensure your header contains the column named by `--transcript-column` and/or
+     `--uniprot-column`.
+- `Missing HGVS p column in input ...`
+   - Ensure your input header contains the column named by `--hgvs-p-column`.
+- `--limit is only supported with --input.` / `--skip is only supported with --input.` / `--errors is only supported with --input.`
+   - These options are batch-mode only. Add `--input ...` or remove those flags in single-variant mode.
+
 By default, this returns all codon-local SNVs that yield the same amino-acid change, along with HGVS c. and HGVS g.
 expressions.
 
@@ -305,8 +363,11 @@ For those cases, the script will either reject the input as unparseable or, for
 stop-loss requests, report that the variant type is not supported.
 
 **Key options:**
+- `--transcript`: Single mode transcript accession (required in single mode unless using `--uniprot-id`)
+- `--transcript-column`: Batch mode input column containing transcript accessions (default: `transcript`)
 - `--assembly`: Genome assembly for HGVS g. projection (default: `GRCh38`)
 - `--uniprot-id`: Resolve UniProt accession to a MANE Select identifier for single-variant mode
+- `--uniprot-column`: Batch mode input column for UniProt IDs used when transcript is blank/missing
 - `--uniprot-target`: UniProt MANE identifier source: `refseq-protein` (default) or `ensembl-transcript`
 - `--include-indels`: Include codon-local insertion/deletion/delins candidates
 - `--use-inv-notation`: Express eligible reverse-complement delins as HGVS `inv` variants
@@ -330,9 +391,14 @@ stop-loss requests, report that the variant type is not supported.
 python -m src.scripts.reverse_translate_variants --input input.tsv --output output.tsv
 ```
 
-By default, batch mode expects columns named `transcript` and `hgvs_p` (override with
-`--transcript-column` and `--hgvs-p-column`). The output includes core columns (`transcript`, optional `uniprot`, and
-`hgvs_p`) plus `variant_type`, `hgvs_c`, and `hgvs_g`.
+By default, batch mode reads transcript accessions from `transcript` and protein HGVS from `hgvs_p` (override with
+`--transcript-column` and `--hgvs-p-column`).
+
+If your file does not have transcript accessions, provide `--uniprot-column` so transcript IDs can be resolved from
+UniProt. At least one of `--transcript-column` or `--uniprot-column` must be present in the input header.
+
+The output includes core columns (`transcript`, optional `uniprot`, and `hgvs_p`) plus `variant_type`, `hgvs_c`, and
+`hgvs_g`.
 
 Rows with missing/blank `hgvs_p` values are skipped. If one or more rows are skipped, the script emits a warning.
 
