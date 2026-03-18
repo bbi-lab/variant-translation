@@ -347,6 +347,10 @@ def minimize_same_length_delins(
 	return codon_offset + leading_matches, len(trimmed_deleted_sequence), trimmed_inserted_sequence
 
 
+def is_frame_preserving_indel(deleted_length: int, inserted_length: int) -> bool:
+	return (inserted_length - deleted_length) % 3 == 0
+
+
 def enumerate_snv_candidates(
 	coding_sequence: str,
 	codon_sequence: str,
@@ -392,6 +396,8 @@ def enumerate_indel_candidates(
 	# Pure insertions (internal to codon only): c.N_N+1insX
 	for codon_offset in (1, 2):
 		for inserted_length in range(1, max_indel_size + 1):
+			if not is_frame_preserving_indel(deleted_length=0, inserted_length=inserted_length):
+				continue
 			for inserted_bases in product(DNA_BASES, repeat=inserted_length):
 				inserted_sequence = "".join(inserted_bases)
 				alternate_cds = apply_cds_edit(
@@ -415,19 +421,22 @@ def enumerate_indel_candidates(
 			]
 
 			# Pure deletion
-			alternate_cds = apply_cds_edit(
-				coding_sequence,
-				codon_cds_start_index + codon_offset,
-				deleted_length,
-				"",
-			)
-			alternate_protein = translate_cds(alternate_cds)
-			if matches_requested_protein_change(reference_protein, alternate_protein, protein_change):
-				hgvs_c = hgvs_c_for_indel(codon_c_start, codon_offset, deleted_length, "")
-				candidates.append(CandidateVariant(variant_type="deletion", hgvs_c=hgvs_c))
+			if is_frame_preserving_indel(deleted_length=deleted_length, inserted_length=0):
+				alternate_cds = apply_cds_edit(
+					coding_sequence,
+					codon_cds_start_index + codon_offset,
+					deleted_length,
+					"",
+				)
+				alternate_protein = translate_cds(alternate_cds)
+				if matches_requested_protein_change(reference_protein, alternate_protein, protein_change):
+					hgvs_c = hgvs_c_for_indel(codon_c_start, codon_offset, deleted_length, "")
+					candidates.append(CandidateVariant(variant_type="deletion", hgvs_c=hgvs_c))
 
 			# Delins
 			for inserted_length in range(1, max_indel_size + 1):
+				if not is_frame_preserving_indel(deleted_length=deleted_length, inserted_length=inserted_length):
+					continue
 				for inserted_bases in product(DNA_BASES, repeat=inserted_length):
 					inserted_sequence = "".join(inserted_bases)
 					trimmed_indel = minimize_same_length_delins(

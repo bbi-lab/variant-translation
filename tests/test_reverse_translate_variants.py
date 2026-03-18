@@ -94,6 +94,8 @@ def test_reverse_translate_non_snv_substitution_includes_triplet_delins() -> Non
     assert rows
     assert any(row["variant_type"] == "delins" for row in rows)
     assert any(row["hgvs_c"] == "NM_TEST.1:c.1_3delinsTGG" for row in rows)
+    assert not any(row["hgvs_c"] == "NM_TEST.1:c.1_2delinsTGG" for row in rows)
+    assert not any(row["hgvs_c"] == "NM_TEST.1:c.1delinsTGG" for row in rows)
 
 
 def test_reverse_translate_prefers_minimal_two_nt_delins_over_full_codon_replacement() -> None:
@@ -122,6 +124,7 @@ def test_reverse_translate_prefers_minimal_two_nt_delins_over_full_codon_replace
     assert rows
     assert any(row["hgvs_c"] == "NM_TEST.1:c.1_2delinsCT" for row in rows)
     assert not any(row["hgvs_c"] == "NM_TEST.1:c.1_3delinsCTT" for row in rows)
+    assert not any(row["hgvs_c"] == "NM_TEST.1:c.1delinsCT" for row in rows)
 
 
 def test_join_variant_rows_keeps_aligned_counts() -> None:
