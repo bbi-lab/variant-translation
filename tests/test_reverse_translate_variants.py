@@ -96,6 +96,34 @@ def test_reverse_translate_non_snv_substitution_includes_triplet_delins() -> Non
     assert any(row["hgvs_c"] == "NM_TEST.1:c.1_3delinsTGG" for row in rows)
 
 
+def test_reverse_translate_prefers_minimal_two_nt_delins_over_full_codon_replacement() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "GCT"  # Ala codon
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Ala1Leu",  # Reachable via 2-nt delins such as GCT -> CTT
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    assert rows
+    assert any(row["hgvs_c"] == "NM_TEST.1:c.1_2delinsCT" for row in rows)
+    assert not any(row["hgvs_c"] == "NM_TEST.1:c.1_3delinsCTT" for row in rows)
+
+
 def test_join_variant_rows_keeps_aligned_counts() -> None:
     joined = rtv.join_variant_rows(
         [

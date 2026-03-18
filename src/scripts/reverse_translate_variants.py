@@ -313,6 +313,40 @@ def hgvs_c_for_indel(codon_c_start: int, codon_offset: int, deleted_length: int,
 	return f"c.{start_position}_{end_position}delins{inserted_sequence}"
 
 
+def minimize_same_length_delins(
+	codon_offset: int,
+	deleted_sequence: str,
+	inserted_sequence: str,
+) -> tuple[int, int, str] | None:
+	if len(deleted_sequence) != len(inserted_sequence):
+		return codon_offset, len(deleted_sequence), inserted_sequence
+
+	leading_matches = 0
+	while (
+		leading_matches < len(deleted_sequence)
+		and deleted_sequence[leading_matches] == inserted_sequence[leading_matches]
+	):
+		leading_matches += 1
+
+	if leading_matches == len(deleted_sequence):
+		return None
+
+	trailing_matches = 0
+	while (
+		trailing_matches < len(deleted_sequence) - leading_matches
+		and deleted_sequence[-(trailing_matches + 1)] == inserted_sequence[-(trailing_matches + 1)]
+	):
+		trailing_matches += 1
+
+	trimmed_deleted_sequence = deleted_sequence[leading_matches : len(deleted_sequence) - trailing_matches]
+	trimmed_inserted_sequence = inserted_sequence[leading_matches : len(inserted_sequence) - trailing_matches]
+
+	if len(trimmed_deleted_sequence) == 1:
+		return None
+
+	return codon_offset + leading_matches, len(trimmed_deleted_sequence), trimmed_inserted_sequence
+
+
 def enumerate_snv_candidates(
 	coding_sequence: str,
 	codon_sequence: str,
@@ -373,9 +407,13 @@ def enumerate_indel_candidates(
 				hgvs_c = hgvs_c_for_indel(codon_c_start, codon_offset, 0, inserted_sequence)
 				candidates.append(CandidateVariant(variant_type="insertion", hgvs_c=hgvs_c))
 
-	# Deletions and length-changing delins fully contained in the codon.
+	# Deletions and delins fully contained in the codon.
 	for deleted_length in range(1, min(3, max_indel_size) + 1):
 		for codon_offset in range(0, 4 - deleted_length):
+			deleted_sequence = coding_sequence[
+				codon_cds_start_index + codon_offset : codon_cds_start_index + codon_offset + deleted_length
+			]
+
 			# Pure deletion
 			alternate_cds = apply_cds_edit(
 				coding_sequence,
@@ -388,12 +426,24 @@ def enumerate_indel_candidates(
 				hgvs_c = hgvs_c_for_indel(codon_c_start, codon_offset, deleted_length, "")
 				candidates.append(CandidateVariant(variant_type="deletion", hgvs_c=hgvs_c))
 
-			# Length-changing delins
+			# Delins
 			for inserted_length in range(1, max_indel_size + 1):
-				if inserted_length == deleted_length:
-					continue
 				for inserted_bases in product(DNA_BASES, repeat=inserted_length):
 					inserted_sequence = "".join(inserted_bases)
+					trimmed_indel = minimize_same_length_delins(
+						codon_offset,
+						deleted_sequence,
+						inserted_sequence,
+					)
+					if inserted_length == deleted_length:
+						if trimmed_indel is None:
+							continue
+						trimmed_codon_offset, trimmed_deleted_length, trimmed_inserted_sequence = trimmed_indel
+					else:
+						trimmed_codon_offset = codon_offset
+						trimmed_deleted_length = deleted_length
+						trimmed_inserted_sequence = inserted_sequence
+
 					alternate_cds = apply_cds_edit(
 						coding_sequence,
 						codon_cds_start_index + codon_offset,
@@ -404,29 +454,13 @@ def enumerate_indel_candidates(
 					if not matches_requested_protein_change(reference_protein, alternate_protein, protein_change):
 						continue
 
-					hgvs_c = hgvs_c_for_indel(codon_c_start, codon_offset, deleted_length, inserted_sequence)
+					hgvs_c = hgvs_c_for_indel(
+						codon_c_start,
+						trimmed_codon_offset,
+						trimmed_deleted_length,
+						trimmed_inserted_sequence,
+					)
 					candidates.append(CandidateVariant(variant_type="delins", hgvs_c=hgvs_c))
-
-	# Same-length full-codon replacements (triplet delins): c.N_N+2delinsNNN
-	# These are essential for amino-acid substitutions not accessible by single-nucleotide variants.
-	if max_indel_size >= 3:
-		for inserted_bases in product(DNA_BASES, repeat=3):
-			inserted_sequence = "".join(inserted_bases)
-			if inserted_sequence == codon_sequence:
-				continue
-
-			alternate_cds = apply_cds_edit(
-				coding_sequence,
-				codon_cds_start_index,
-				3,
-				inserted_sequence,
-			)
-			alternate_protein = translate_cds(alternate_cds)
-			if not matches_requested_protein_change(reference_protein, alternate_protein, protein_change):
-				continue
-
-			hgvs_c = hgvs_c_for_indel(codon_c_start, 0, 3, inserted_sequence)
-			candidates.append(CandidateVariant(variant_type="delins", hgvs_c=hgvs_c))
 
 	return candidates
 
