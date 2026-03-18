@@ -248,6 +248,39 @@ length-changing insertion/deletion candidates:
 python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs-p p.Arg175Ter --include-indels --substitutions-and-delins-only
 ```
 
+**Supported protein HGVS inputs**
+
+This tool currently accepts **single-amino-acid changes at one position**:
+
+- missense/substitution, e.g. `p.Arg175His`
+- synonymous, e.g. `p.Arg175=`
+- premature stop / stop-gain, e.g. `p.Arg175Ter` or `p.Arg175*`
+- single-amino-acid deletion, e.g. `p.Arg175del`
+
+It also accepts the same forms with an optional protein accession prefix, e.g.
+`NP_000537.3:p.Arg175His`, and `--auto-format-hgvs-p` can help with shorthand
+inputs such as `R175H`, `R175=`, `A334del`, or `A334-`.
+
+When `--include-indels` is enabled, the script may return DNA-level
+insertions, deletions, `delins`, or `inv` candidates **that produce one of the
+supported protein outcomes above**. That option does **not** mean the input
+protein HGVS can itself be an arbitrary protein indel notation.
+
+**Not currently supported**
+
+The reverse-translation parser does not currently handle broader protein HGVS
+classes such as:
+
+- single-amino-acid insertions
+- multi-residue deletions, insertions, duplications, or `delins`
+- frameshifts (for example `fs` forms)
+- extensions / stop-loss forms (for example `ext*?`); note that plain stop-loss
+   requests with `*` as the reference amino acid are explicitly rejected
+- complex protein expressions spanning more than one amino-acid position
+
+For those cases, the script will either reject the input as unparseable or, for
+stop-loss requests, report that the variant type is not supported.
+
 **Key options:**
 - `--assembly`: Genome assembly for HGVS g. projection (default: `GRCh38`)
 - `--uniprot-id`: Resolve UniProt accession to a MANE Select identifier for single-variant mode
