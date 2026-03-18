@@ -38,12 +38,12 @@ SORT_CHOICES = click.Choice(
 
 
 def configure_csv_field_size_limit(field_size_limit: int) -> None:
-	try:
-		csv.field_size_limit(field_size_limit)
-	except OverflowError as exception:
-		raise click.ClickException(
-			f"Invalid --csv-field-size-limit value {field_size_limit}: exceeds platform maximum."
-		) from exception
+    try:
+        csv.field_size_limit(field_size_limit)
+    except OverflowError as exception:
+        raise click.ClickException(
+            f"Invalid --csv-field-size-limit value {field_size_limit}: exceeds platform maximum."
+        ) from exception
 
 
 @click.command()
@@ -69,11 +69,11 @@ def configure_csv_field_size_limit(field_size_limit: int) -> None:
     help="Output TSV file path.  Defaults to stdout.",
 )
 @click.option(
-	"--csv-field-size-limit",
-	default=csv.field_size_limit(),
-	show_default=True,
-	type=click.IntRange(min=1),
-	help="Maximum per-field character length for CSV/TSV parsing in batch mode.",
+    "--csv-field-size-limit",
+    default=csv.field_size_limit(),
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Maximum per-field character length for CSV/TSV parsing in batch mode.",
 )
 @click.option(
     "--sort",
@@ -90,7 +90,7 @@ def configure_csv_field_size_limit(field_size_limit: int) -> None:
 def main(
     input_path: Path,
     column_name: str,
-	csv_field_size_limit: int,
+    csv_field_size_limit: int,
     output_path: Path | None,
     sort_order: str,
 ) -> None:

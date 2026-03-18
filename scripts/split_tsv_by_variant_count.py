@@ -132,11 +132,7 @@ def main(
                     multiple_rows += 1
 
     click.echo(
-        "Split summary: "
-        f"{total_rows} input rows, "
-        f"{empty_rows} empty, "
-        f"{single_rows} single, "
-        f"{multiple_rows} multiple.",
+        f"Split summary: {total_rows} input rows, {empty_rows} empty, {single_rows} single, {multiple_rows} multiple.",
         err=True,
     )
 

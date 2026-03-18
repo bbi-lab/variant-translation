@@ -1304,6 +1304,7 @@ def test_batch_mode_resolves_unique_uniprot_ids_first(runner: CliRunner, tmp_pat
     assert rows[1]["hgvs_c"] == "NM_000546.6:c.1A>G"
     assert rows[2]["hgvs_c"] == "NM_000059.4:c.1A>G"
 
+
 def test_auto_format_hgvs_p_string_with_substitution() -> None:
     """Test auto-formatting single amino acid substitution strings to HGVS p. format."""
     assert rtv.auto_format_hgvs_p_string("A334D") == "p.A334D"
@@ -1350,15 +1351,19 @@ def test_single_mode_auto_format_hgvs_p_substitution(runner: CliRunner, tmp_path
 
     mocked_mapper = Mock()
 
-    with patch(
-        "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
-        return_value=data_provider,
-    ), patch(
-        "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
-        return_value=mocked_mapper,
-    ), patch(
-        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
-        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    with (
+        patch(
+            "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
+            return_value=data_provider,
+        ),
+        patch(
+            "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
+            return_value=mocked_mapper,
+        ),
+        patch(
+            "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+            side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+        ),
     ):
         result = runner.invoke(
             rtv.main,
@@ -1387,24 +1392,29 @@ def test_single_mode_auto_format_hgvs_p_deletion(runner: CliRunner, tmp_path: Pa
 
     mocked_mapper = Mock()
 
-    with patch(
-        "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
-        return_value=data_provider,
-    ), patch(
-        "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
-        return_value=mocked_mapper,
-    ), patch(
-        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
-        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
-    ), patch(
-        "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
-        return_value=[  # Mock a successful deletion result
-            {
-                "variant_type": "del",
-                "hgvs_c": "NM_TEST.1:c.1_3del",
-                "hgvs_g": "NC_000001.11:g.1_3del",
-            }
-        ],
+    with (
+        patch(
+            "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
+            return_value=data_provider,
+        ),
+        patch(
+            "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
+            return_value=mocked_mapper,
+        ),
+        patch(
+            "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+            side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+        ),
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[  # Mock a successful deletion result
+                {
+                    "variant_type": "del",
+                    "hgvs_c": "NM_TEST.1:c.1_3del",
+                    "hgvs_g": "NC_000001.11:g.1_3del",
+                }
+            ],
+        ),
     ):
         result = runner.invoke(
             rtv.main,
@@ -1513,15 +1523,19 @@ def test_single_mode_deletion_variant(runner: CliRunner, tmp_path: Path) -> None
 
     mocked_mapper = Mock()
 
-    with patch(
-        "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
-        return_value=data_provider,
-    ), patch(
-        "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
-        return_value=mocked_mapper,
-    ), patch(
-        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
-        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    with (
+        patch(
+            "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
+            return_value=data_provider,
+        ),
+        patch(
+            "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
+            return_value=mocked_mapper,
+        ),
+        patch(
+            "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+            side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+        ),
     ):
         result = runner.invoke(
             rtv.main,
@@ -1536,7 +1550,7 @@ def test_single_mode_deletion_variant(runner: CliRunner, tmp_path: Path) -> None
         )
 
     assert result.exit_code == 0, result.output
-    
+
     # Verify output contains a deletion variant
     with output_path.open("r", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
