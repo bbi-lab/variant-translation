@@ -56,6 +56,7 @@ def test_reverse_translate_hgvs_p_with_mocked_data_provider() -> None:
             include_indels=False,
             max_indel_size=3,
             strict_ref_aa=True,
+            use_inv_notation=False,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -85,6 +86,7 @@ def test_reverse_translate_non_snv_substitution_includes_triplet_delins() -> Non
             include_indels=True,
             max_indel_size=3,
             strict_ref_aa=True,
+            use_inv_notation=False,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -115,6 +117,7 @@ def test_reverse_translate_prefers_minimal_two_nt_delins_over_full_codon_replace
             include_indels=True,
             max_indel_size=3,
             strict_ref_aa=True,
+            use_inv_notation=False,
             parser=Mock(),
             mapper=Mock(),
             data_provider=data_provider,
@@ -125,6 +128,62 @@ def test_reverse_translate_prefers_minimal_two_nt_delins_over_full_codon_replace
     assert any(row["hgvs_c"] == "NM_TEST.1:c.1_2delinsCT" for row in rows)
     assert not any(row["hgvs_c"] == "NM_TEST.1:c.1_3delinsCTT" for row in rows)
     assert not any(row["hgvs_c"] == "NM_TEST.1:c.1delinsCT" for row in rows)
+
+
+def test_reverse_translate_can_emit_inv_for_full_codon_inversion() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "GCT"  # Ala codon; reverse complement is AGC (Ser)
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Ala1Ser",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    assert any(row["variant_type"] == "inv" and row["hgvs_c"] == "NM_TEST.1:c.1_3inv" for row in rows)
+    assert not any(row["hgvs_c"] == "NM_TEST.1:c.1_3delinsAGC" for row in rows)
+
+
+def test_reverse_translate_can_emit_inv_for_minimized_two_nt_inversion() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "GCT"  # Positions 2-3: CT -> AG (reverse complement), yielding GAG (Glu)
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Ala1Glu",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    assert any(row["variant_type"] == "inv" and row["hgvs_c"] == "NM_TEST.1:c.2_3inv" for row in rows)
+    assert not any(row["hgvs_c"] == "NM_TEST.1:c.2_3delinsAG" for row in rows)
 
 
 def test_join_variant_rows_keeps_aligned_counts() -> None:

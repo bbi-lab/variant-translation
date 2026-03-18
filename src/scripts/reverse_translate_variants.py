@@ -58,6 +58,7 @@ import hgvs.parser
 load_dotenv()
 
 DNA_BASES = ("A", "C", "G", "T")
+DNA_COMPLEMENTS = str.maketrans({"A": "T", "C": "G", "G": "C", "T": "A"})
 
 
 CODON_TO_AA = {
@@ -313,13 +314,25 @@ def hgvs_c_for_indel(codon_c_start: int, codon_offset: int, deleted_length: int,
 	return f"c.{start_position}_{end_position}delins{inserted_sequence}"
 
 
+def reverse_complement_dna(sequence: str) -> str:
+	return sequence.upper().translate(DNA_COMPLEMENTS)[::-1]
+
+
+def is_inversion_replacement(deleted_sequence: str, inserted_sequence: str) -> bool:
+	return (
+		len(deleted_sequence) > 1
+		and len(deleted_sequence) == len(inserted_sequence)
+		and inserted_sequence == reverse_complement_dna(deleted_sequence)
+	)
+
+
 def minimize_same_length_delins(
 	codon_offset: int,
 	deleted_sequence: str,
 	inserted_sequence: str,
-) -> tuple[int, int, str] | None:
+) -> tuple[int, str, str] | None:
 	if len(deleted_sequence) != len(inserted_sequence):
-		return codon_offset, len(deleted_sequence), inserted_sequence
+		return codon_offset, deleted_sequence, inserted_sequence
 
 	leading_matches = 0
 	while (
@@ -344,11 +357,27 @@ def minimize_same_length_delins(
 	if len(trimmed_deleted_sequence) == 1:
 		return None
 
-	return codon_offset + leading_matches, len(trimmed_deleted_sequence), trimmed_inserted_sequence
+	return codon_offset + leading_matches, trimmed_deleted_sequence, trimmed_inserted_sequence
 
 
 def is_frame_preserving_indel(deleted_length: int, inserted_length: int) -> bool:
 	return (inserted_length - deleted_length) % 3 == 0
+
+
+def hgvs_c_for_delins_or_inv(
+	codon_c_start: int,
+	codon_offset: int,
+	deleted_sequence: str,
+	inserted_sequence: str,
+	use_inv_notation: bool,
+) -> tuple[str, str]:
+	deleted_length = len(deleted_sequence)
+	if use_inv_notation and is_inversion_replacement(deleted_sequence, inserted_sequence):
+		start_position = codon_c_start + codon_offset
+		end_position = start_position + deleted_length - 1
+		return "inv", f"c.{start_position}_{end_position}inv"
+
+	return "delins", hgvs_c_for_indel(codon_c_start, codon_offset, deleted_length, inserted_sequence)
 
 
 def enumerate_snv_candidates(
@@ -390,6 +419,7 @@ def enumerate_indel_candidates(
 	reference_protein: str,
 	protein_change: ProteinChange,
 	max_indel_size: int,
+	use_inv_notation: bool,
 ) -> list[CandidateVariant]:
 	candidates: list[CandidateVariant] = []
 
@@ -447,10 +477,10 @@ def enumerate_indel_candidates(
 					if inserted_length == deleted_length:
 						if trimmed_indel is None:
 							continue
-						trimmed_codon_offset, trimmed_deleted_length, trimmed_inserted_sequence = trimmed_indel
+						trimmed_codon_offset, trimmed_deleted_sequence, trimmed_inserted_sequence = trimmed_indel
 					else:
 						trimmed_codon_offset = codon_offset
-						trimmed_deleted_length = deleted_length
+						trimmed_deleted_sequence = deleted_sequence
 						trimmed_inserted_sequence = inserted_sequence
 
 					alternate_cds = apply_cds_edit(
@@ -463,13 +493,14 @@ def enumerate_indel_candidates(
 					if not matches_requested_protein_change(reference_protein, alternate_protein, protein_change):
 						continue
 
-					hgvs_c = hgvs_c_for_indel(
+					variant_type, hgvs_c = hgvs_c_for_delins_or_inv(
 						codon_c_start,
 						trimmed_codon_offset,
-						trimmed_deleted_length,
+						trimmed_deleted_sequence,
 						trimmed_inserted_sequence,
+						use_inv_notation=use_inv_notation,
 					)
-					candidates.append(CandidateVariant(variant_type="delins", hgvs_c=hgvs_c))
+					candidates.append(CandidateVariant(variant_type=variant_type, hgvs_c=hgvs_c))
 
 	return candidates
 
@@ -677,6 +708,7 @@ def reverse_translate_hgvs_p(
 	include_indels: bool,
 	max_indel_size: int,
 	strict_ref_aa: bool,
+	use_inv_notation: bool,
 	parser: hgvs.parser.Parser,
 	mapper: hgvs.assemblymapper.AssemblyMapper,
 	data_provider: Any,
@@ -741,6 +773,7 @@ def reverse_translate_hgvs_p(
 					reference_protein,
 					protein_change,
 					max_indel_size=max_indel_size,
+					use_inv_notation=use_inv_notation,
 				)
 			)
 
@@ -914,6 +947,12 @@ def join_variant_rows(
 	help="Auto-convert one-letter amino acid notation (e.g., 'A334D' or 'A334del') to HGVS p. format (e.g., 'p.A334D').",
 )
 @click.option(
+	"--use-inv-notation",
+	is_flag=True,
+	default=False,
+	help="Express eligible reverse-complement delins as HGVS inv variants instead of delins.",
+)
+@click.option(
 	"--one-row-per-input",
 	is_flag=True,
 	default=False,
@@ -949,6 +988,7 @@ def main(
 	max_indel_size: int,
 	strict_ref_aa: bool,
 	auto_format_hgvs_p: bool,
+	use_inv_notation: bool,
 	one_row_per_input: bool,
 	join_delimiter: str,
 	output: Path | None,
@@ -1018,6 +1058,7 @@ def main(
 			include_indels=include_indels,
 			max_indel_size=max_indel_size,
 			strict_ref_aa=strict_ref_aa,
+			use_inv_notation=use_inv_notation,
 			parser=parser,
 			mapper=mapper,
 			data_provider=data_provider,
@@ -1221,6 +1262,7 @@ def main(
 					include_indels=include_indels,
 					max_indel_size=max_indel_size,
 					strict_ref_aa=strict_ref_aa,
+					use_inv_notation=use_inv_notation,
 					parser=parser,
 					mapper=mapper,
 					data_provider=data_provider,
