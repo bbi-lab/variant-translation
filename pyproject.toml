@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "variant-translation"
-version = "0.1.0"
+version = "1.0.0"
 authors = [
     { name="Jeremy Stone", email="74574922+jstone-dev@users.noreply.github.com" },
 ]
@@ -33,6 +33,10 @@ publish = [
 [project.scripts]
 reverse-translate-variants = "src.scripts.reverse_translate_variants:main"
 compare-reverse-translated-variants = "src.scripts.compare_reverse_translated_variants:main"
+
+[project.urls]
+"Homepage" = "https://github.com/bbi-lab/variant-translation"
+"Bug Tracker" = "https://github.com/bbi-lab/variant-translation/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
