@@ -22,8 +22,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black",
     "pytest",
+    "ruff",
 ]
 publish = [
     "build",
@@ -37,6 +37,13 @@ compare-reverse-translated-variants = "src.scripts.compare_reverse_translated_va
 [project.urls]
 "Homepage" = "https://github.com/bbi-lab/variant-translation"
 "Bug Tracker" = "https://github.com/bbi-lab/variant-translation/issues"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.format]
+line-ending = "lf"
 
 [tool.setuptools.packages.find]
 where = ["."]

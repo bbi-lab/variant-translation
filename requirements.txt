@@ -1,5 +1,4 @@
 build
-black
 click
 hgvs
 pytest
