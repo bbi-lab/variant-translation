@@ -466,6 +466,46 @@ You can add this line to your shell profile or `.env` file so it persists across
 If `UTA_DB_URL` is not set the library falls back to the public cloud instance at
 `postgresql://anonymous:anonymous@uta.biocommons.org/uta/uta_20241220`.
 
+#### Step 5 — Optional: use a local SeqRepo to avoid repeated network fetches
+
+When mapping c. variants to g. coordinates, the `hgvs` library calls
+`SeqFetcher.fetch_seq` for each candidate variant. Without a local sequence
+store this makes a fresh NCBI/Ensembl HTTP request for every call — there is
+**no internal caching** in `SeqFetcher` or in the UTA data provider's
+`get_seq` method.
+
+> **Note:** The script's own `transcript_cache` dict prevents repeated
+> `get_seq` calls for the same transcript accession, but it does not cover the
+> genomic-sequence lookups made internally by `AssemblyMapper` during c→g
+> mapping. Those are what benefit most from a local SeqRepo.
+
+Install and populate a local [SeqRepo](https://github.com/biocommons/biocommons.seqrepo)
+snapshot, then set `HGVS_SEQREPO_DIR` so the `hgvs` library uses it instead
+of the network:
+
+```bash
+# Install the seqrepo command-line tool
+pip install seqrepo
+
+# Download the latest snapshot (several GB; run once)
+sudo seqrepo --root-directory /usr/local/share/seqrepo pull
+
+# The pull creates a dated directory and a 'latest' symlink, e.g.:
+#   /usr/local/share/seqrepo/2021-01-29/   ← snapshot
+#   /usr/local/share/seqrepo/latest        ← symlink → 2021-01-29
+export HGVS_SEQREPO_DIR=/usr/local/share/seqrepo/latest
+```
+
+You can add this variable to your shell profile or `.env` file so it persists:
+
+```dotenv
+export HGVS_SEQREPO_DIR=/usr/local/share/seqrepo/latest
+```
+
+With `HGVS_SEQREPO_DIR` set, the `hgvs` `SeqFetcher` switches to a local
+`biocommons.seqrepo.SeqRepo` instance and serves all sequences from disk
+without any network calls, which significantly speeds up large batch runs.
+
 #### Stop, restart, and remove the container
 
 ```bash
