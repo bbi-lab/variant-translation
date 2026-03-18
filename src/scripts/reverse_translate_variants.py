@@ -63,12 +63,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import click
-from dotenv import load_dotenv
 import hgvs.assemblymapper
 import hgvs.dataproviders.uta
 import hgvs.parser
-
-load_dotenv()
 
 DNA_BASES = ("A", "C", "G", "T")
 DNA_COMPLEMENTS = str.maketrans({"A": "T", "C": "G", "G": "C", "T": "A"})
@@ -1142,6 +1139,10 @@ def main(
 	join_delimiter: str,
 	output: Path | None,
 ) -> None:
+	from dotenv import load_dotenv
+
+	load_dotenv()
+
 	uniprot_target = uniprot_target.lower()
 	input_format = input_format.lower()
 
