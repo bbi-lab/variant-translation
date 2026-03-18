@@ -1,0 +1,984 @@
+import csv
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from click.testing import CliRunner
+import pytest
+
+from src.scripts import reverse_translate_variants as rtv
+
+
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
+
+
+def write_tsv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_csv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter=",")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_parse_hgvs_protein_change() -> None:
+    parsed = rtv.parse_hgvs_protein_change("p.Arg175His")
+    assert parsed.reference_aa == "R"
+    assert parsed.position == 175
+    assert parsed.alternate_aa == "H"
+
+    parsed_synonymous = rtv.parse_hgvs_protein_change("NP_000537.3:p.Arg175=")
+    assert parsed_synonymous.reference_aa == "R"
+    assert parsed_synonymous.position == 175
+    assert parsed_synonymous.alternate_aa == "R"
+
+
+def test_reverse_translate_hgvs_p_with_mocked_data_provider() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "ATG"
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Met1Val",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["variant_type"] == "snv"
+    assert rows[0]["hgvs_c"] == "NM_TEST.1:c.1A>G"
+    assert rows[0]["hgvs_g"] == "GENOMIC:NM_TEST.1:c.1A>G"
+
+
+def test_reverse_translate_non_snv_substitution_includes_triplet_delins() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "GCT"  # Ala codon
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Ala1Trp",  # Requires multi-nt change; not SNV-accessible from GCT
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    assert rows
+    assert any(row["variant_type"] == "delins" for row in rows)
+    assert any(row["hgvs_c"] == "NM_TEST.1:c.1_3delinsTGG" for row in rows)
+
+
+def test_join_variant_rows_keeps_aligned_counts() -> None:
+    joined = rtv.join_variant_rows(
+        [
+            {"variant_type": "snv", "hgvs_c": "NM_TEST.1:c.1A>G", "hgvs_g": "NC_000001.11:g.1A>G"},
+            {"variant_type": "delins", "hgvs_c": "NM_TEST.1:c.1_3delinsTGG", "hgvs_g": "NC_000001.11:g.1_3delinsTGG"},
+        ],
+        join_delimiter="|",
+    )
+
+    assert joined["variant_type"] == "snv|delins"
+    assert joined["hgvs_c"] == "NM_TEST.1:c.1A>G|NM_TEST.1:c.1_3delinsTGG"
+    assert joined["hgvs_g"] == "NC_000001.11:g.1A>G|NC_000001.11:g.1_3delinsTGG"
+    assert len(joined["hgvs_c"].split("|")) == len(joined["hgvs_g"].split("|"))
+
+
+def test_batch_mode_pass_through_columns_with_prefix(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {
+                "sample_id": "row1",
+                "note": "keep me",
+                "transcript": "NM_A.1",
+                "hgvs_p": "p.Arg2His",
+            },
+            {
+                "sample_id": "row2",
+                "note": "no variants",
+                "transcript": "NM_B.1",
+                "hgvs_p": "p.Gly2=",
+            },
+        ],
+        fieldnames=["sample_id", "note", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        if kwargs["transcript_accession"] == "NM_A.1":
+            return [
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>G",
+                    "hgvs_g": "NC_000001.11:g.100A>G",
+                },
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>T",
+                    "hgvs_g": "NC_000001.11:g.100A>T",
+                },
+            ]
+        return []
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--pass-through-columns",
+                "--pass-through-prefix",
+                "meta_",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 3
+    assert reader.fieldnames is not None
+    assert "meta_sample_id" in reader.fieldnames
+    assert "meta_note" in reader.fieldnames
+    assert "variant_type" in reader.fieldnames
+    assert "hgvs_c" in reader.fieldnames
+    assert "hgvs_g" in reader.fieldnames
+
+    assert rows[0]["meta_sample_id"] == "row1"
+    assert rows[0]["meta_note"] == "keep me"
+    assert rows[0]["hgvs_c"] == "NM_A.1:c.10A>G"
+
+    assert rows[1]["meta_sample_id"] == "row1"
+    assert rows[1]["meta_note"] == "keep me"
+    assert rows[1]["hgvs_c"] == "NM_A.1:c.10A>T"
+
+    assert rows[2]["meta_sample_id"] == "row2"
+    assert rows[2]["meta_note"] == "no variants"
+    assert rows[2]["variant_type"] == ""
+    assert rows[2]["hgvs_c"] == ""
+    assert rows[2]["hgvs_g"] == ""
+
+
+def test_batch_mode_does_not_pass_through_additional_columns_by_default(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {
+                "sample_id": "row1",
+                "note": "keep me",
+                "transcript": "NM_A.1",
+                "hgvs_p": "p.Arg2His",
+            }
+        ],
+        fieldnames=["sample_id", "note", "transcript", "hgvs_p"],
+    )
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>G",
+                    "hgvs_g": "NC_000001.11:g.100A>G",
+                }
+            ],
+        ),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 1
+    assert reader.fieldnames is not None
+    assert "sample_id" not in reader.fieldnames
+    assert "note" not in reader.fieldnames
+    assert "transcript" in reader.fieldnames
+    assert "hgvs_p" in reader.fieldnames
+    assert rows[0]["transcript"] == "NM_A.1"
+    assert rows[0]["hgvs_c"] == "NM_A.1:c.10A>G"
+
+
+def test_batch_mode_fails_when_transcript_column_missing(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "missing_transcript.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[{"sample_id": "row1", "hgvs_p": "p.Arg175His"}],
+        fieldnames=["sample_id", "hgvs_p"],
+    )
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert "Missing transcript column in input TSV" in result.output
+
+
+def test_batch_mode_fails_when_hgvs_p_column_missing(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "missing_hgvs_p.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[{"sample_id": "row1", "transcript": "NM_000546.6"}],
+        fieldnames=["sample_id", "transcript"],
+    )
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert "Missing HGVS p column in input TSV" in result.output
+
+
+def test_batch_mode_skips_rows_missing_hgvs_p_with_warning(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "missing_hgvs_p_values.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+            {"transcript": "NM_B.1", "hgvs_p": ""},
+            {"transcript": "NM_C.1", "hgvs_p": "p.Gly2="},
+        ],
+        fieldnames=["transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+    mocked_reverse_translate = Mock(
+        return_value=[
+            {
+                "variant_type": "snv",
+                "hgvs_c": "NM_TEST.1:c.10A>G",
+                "hgvs_g": "NC_000001.11:g.100A>G",
+            }
+        ]
+    )
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mocked_reverse_translate.call_count == 2
+    assert "Warning: Skipped 1 row(s) with missing HGVS p. values." in result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 2
+    assert [row["transcript"] for row in rows] == ["NM_A.1", "NM_C.1"]
+
+
+def test_batch_mode_limit_processes_first_n_rows(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "limit_input.tsv"
+    output_path = tmp_path / "limit_output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row2", "transcript": "NM_B.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row3", "transcript": "NM_C.1", "hgvs_p": "p.Arg2His"},
+        ],
+        fieldnames=["sample_id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.10A>G",
+                "hgvs_g": "NC_000001.11:g.100A>G",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--limit",
+                "2",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 2
+    assert [row["transcript"] for row in rows] == ["NM_A.1", "NM_B.1"]
+
+
+def test_single_mode_one_row_per_input_joins_variants(runner: CliRunner) -> None:
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_TEST.1:c.1A>G",
+                    "hgvs_g": "NC_000001.11:g.1A>G",
+                },
+                {
+                    "variant_type": "delins",
+                    "hgvs_c": "NM_TEST.1:c.1_3delinsTGG",
+                    "hgvs_g": "NC_000001.11:g.1_3delinsTGG",
+                },
+            ],
+        ),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--transcript",
+                "NM_TEST.1",
+                "--hgvs-p",
+                "p.Ala1Trp",
+                "--one-row-per-input",
+                "--join-delimiter",
+                "|",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    output_lines = [line for line in result.output.splitlines() if line.strip()]
+    assert any("hgvs_p\ttranscript\tvariant_type\thgvs_c\thgvs_g" in line for line in output_lines)
+    assert any("snv|delins" in line for line in output_lines)
+    assert any("NM_TEST.1:c.1A>G|NM_TEST.1:c.1_3delinsTGG" in line for line in output_lines)
+
+
+def test_batch_mode_one_row_per_input_joins_variants(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "one_row_input.tsv"
+    output_path = tmp_path / "one_row_output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row2", "transcript": "NM_B.1", "hgvs_p": "p.Gly2="},
+        ],
+        fieldnames=["sample_id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        if kwargs["transcript_accession"] == "NM_A.1":
+            return [
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>G",
+                    "hgvs_g": "NC_000001.11:g.100A>G",
+                },
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>T",
+                    "hgvs_g": "NC_000001.11:g.100A>T",
+                },
+            ]
+        return []
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--pass-through-columns",
+                "--one-row-per-input",
+                "--join-delimiter",
+                "|",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 2
+    assert rows[0]["sample_id"] == "row1"
+    assert rows[0]["variant_type"] == "snv|snv"
+    assert rows[0]["hgvs_c"] == "NM_A.1:c.10A>G|NM_A.1:c.10A>T"
+    assert rows[0]["hgvs_g"] == "NC_000001.11:g.100A>G|NC_000001.11:g.100A>T"
+    assert len(rows[0]["hgvs_c"].split("|")) == len(rows[0]["hgvs_g"].split("|"))
+
+    assert rows[1]["sample_id"] == "row2"
+    assert rows[1]["variant_type"] == ""
+    assert rows[1]["hgvs_c"] == ""
+    assert rows[1]["hgvs_g"] == ""
+
+
+def test_single_mode_resolves_uniprot_id(runner: CliRunner) -> None:
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch(
+            "src.scripts.reverse_translate_variants.resolve_uniprot_id_to_transcript_accession",
+            return_value="NM_TEST.1",
+        ) as mocked_resolve_uniprot,
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_TEST.1:c.1A>G",
+                    "hgvs_g": "NC_000001.11:g.1A>G",
+                }
+            ],
+        ) as mocked_reverse_translate,
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--uniprot-id",
+                "P04637",
+                "--hgvs-p",
+                "p.Met1Val",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "NM_TEST.1" in result.output
+    assert "NM_TEST.1:c.1A>G" in result.output
+    assert mocked_resolve_uniprot.call_count == 1
+    assert mocked_reverse_translate.call_count == 1
+
+
+def test_batch_mode_resolves_unique_uniprot_ids_first(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input_uniprot.tsv"
+    output_path = tmp_path / "output_uniprot.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "uniprot_id": "P04637", "hgvs_p": "p.Arg175His"},
+            {"sample_id": "row2", "uniprot_id": "P04637", "hgvs_p": "p.Arg175His"},
+            {"sample_id": "row3", "uniprot_id": "P38398", "hgvs_p": "p.Gly2Asp"},
+        ],
+        fieldnames=["sample_id", "uniprot_id", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_resolve_uniprot(**kwargs):
+        if kwargs["uniprot_id"] == "P04637":
+            return "NM_000546.6"
+        if kwargs["uniprot_id"] == "P38398":
+            return "NM_000059.4"
+        raise AssertionError(f"Unexpected UniProt ID in test: {kwargs['uniprot_id']}")
+
+    def mocked_reverse_translate(**kwargs):
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.1A>G",
+                "hgvs_g": "NC_000001.11:g.1A>G",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch(
+            "src.scripts.reverse_translate_variants.resolve_uniprot_id_to_transcript_accession",
+            side_effect=mocked_resolve_uniprot,
+        ) as mocked_resolve_uniprot_fn,
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--uniprot-column",
+                "uniprot_id",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mocked_resolve_uniprot_fn.call_count == 2
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 3
+    assert rows[0]["hgvs_c"] == "NM_000546.6:c.1A>G"
+    assert rows[1]["hgvs_c"] == "NM_000546.6:c.1A>G"
+    assert rows[2]["hgvs_c"] == "NM_000059.4:c.1A>G"
+
+def test_auto_format_hgvs_p_string_with_substitution() -> None:
+    """Test auto-formatting single amino acid substitution strings to HGVS p. format."""
+    assert rtv.auto_format_hgvs_p_string("A334D") == "p.A334D"
+    assert rtv.auto_format_hgvs_p_string("Met1Val") == "p.Met1Val"
+    assert rtv.auto_format_hgvs_p_string("*123C") == "p.*123C"
+    assert rtv.auto_format_hgvs_p_string("R175=") == "p.R175="
+
+
+def test_auto_format_hgvs_p_string_with_deletion() -> None:
+    """Test auto-formatting single amino acid deletion strings to HGVS p. format."""
+    assert rtv.auto_format_hgvs_p_string("A334del") == "p.A334del"
+    assert rtv.auto_format_hgvs_p_string("Met1del") == "p.Met1del"
+    assert rtv.auto_format_hgvs_p_string("*123del") == "p.*123del"
+
+
+def test_auto_format_hgvs_p_string_already_formatted() -> None:
+    """Test that already formatted HGVS p. strings are returned unchanged."""
+    assert rtv.auto_format_hgvs_p_string("p.A334D") == "p.A334D"
+    assert rtv.auto_format_hgvs_p_string("p.Met1Val") == "p.Met1Val"
+    assert rtv.auto_format_hgvs_p_string("p.A334del") == "p.A334del"
+
+
+def test_auto_format_hgvs_p_string_non_matching_patterns() -> None:
+    """Test that non-matching patterns are returned unchanged."""
+    assert rtv.auto_format_hgvs_p_string("invalid") == "invalid"
+    assert rtv.auto_format_hgvs_p_string("A334D335E") == "A334D335E"  # Multiple changes
+    assert rtv.auto_format_hgvs_p_string("p.Arg175His") == "p.Arg175His"  # Already proper format
+    assert rtv.auto_format_hgvs_p_string("") == ""  # Empty string
+
+
+def test_auto_format_hgvs_p_string_with_whitespace() -> None:
+    """Test that whitespace is trimmed before formatting."""
+    assert rtv.auto_format_hgvs_p_string("  A334D  ") == "p.A334D"
+    assert rtv.auto_format_hgvs_p_string("  A334del  ") == "p.A334del"
+
+
+def test_single_mode_auto_format_hgvs_p_substitution(runner: CliRunner, tmp_path: Path) -> None:
+    """Test --auto-format-hgvs-p flag in single mode with amino acid substitution."""
+    output_path = tmp_path / "output.tsv"
+
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "ATG"  # Single codon = M (Met)
+
+    mocked_mapper = Mock()
+
+    with patch(
+        "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
+        return_value=data_provider,
+    ), patch(
+        "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
+        return_value=mocked_mapper,
+    ), patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--transcript",
+                "NM_TEST.1",
+                "--hgvs-p",
+                "M1V",  # One-letter format without p. prefix, position 1 is valid for 1 AA sequence
+                "--auto-format-hgvs-p",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Generated" in result.output
+
+
+def test_single_mode_auto_format_hgvs_p_deletion(runner: CliRunner, tmp_path: Path) -> None:
+    """Test --auto-format-hgvs-p flag in single mode with amino acid deletion."""
+    output_path = tmp_path / "output.tsv"
+
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    data_provider.get_seq.return_value = "ATGGCT"  # Two codons = M (Met), A (Ala)
+
+    mocked_mapper = Mock()
+
+    with patch(
+        "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
+        return_value=data_provider,
+    ), patch(
+        "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
+        return_value=mocked_mapper,
+    ), patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ), patch(
+        "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+        return_value=[  # Mock a successful deletion result
+            {
+                "variant_type": "del",
+                "hgvs_c": "NM_TEST.1:c.1_3del",
+                "hgvs_g": "NC_000001.11:g.1_3del",
+            }
+        ],
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--transcript",
+                "NM_TEST.1",
+                "--hgvs-p",
+                "M1del",  # Deletion format without p. prefix
+                "--auto-format-hgvs-p",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Generated" in result.output
+
+
+def test_batch_mode_auto_format_hgvs_p(runner: CliRunner, tmp_path: Path) -> None:
+    """Test --auto-format-hgvs-p flag in batch mode with mixed substitutions and deletions."""
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "transcript": "NM_A.1", "hgvs_p": "A334D"},  # Substitution without p.
+            {"sample_id": "row2", "transcript": "NM_B.1", "hgvs_p": "M1V"},  # Short form
+            {"sample_id": "row3", "transcript": "NM_C.1", "hgvs_p": "A334del"},  # Deletion without p.
+        ],
+        fieldnames=["sample_id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.1A>G",
+                "hgvs_g": "NC_000001.11:g.1A>G",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--auto-format-hgvs-p",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 3
+    assert rows[0]["hgvs_c"] == "NM_A.1:c.1A>G"
+    assert rows[1]["hgvs_c"] == "NM_B.1:c.1A>G"
+    assert rows[2]["hgvs_c"] == "NM_C.1:c.1A>G"
+
+
+def test_parse_hgvs_protein_deletion() -> None:
+    """Test parsing HGVS p. strings with deletion suffix."""
+    parsed = rtv.parse_hgvs_protein_change("p.Arg175del")
+    assert parsed.reference_aa == "R"
+    assert parsed.position == 175
+    assert parsed.alternate_aa == ""
+
+    parsed_single_letter = rtv.parse_hgvs_protein_change("p.A334del")
+    assert parsed_single_letter.reference_aa == "A"
+    assert parsed_single_letter.position == 334
+    assert parsed_single_letter.alternate_aa == ""
+
+    parsed_with_accession = rtv.parse_hgvs_protein_change("NP_000537.3:p.Met1del")
+    assert parsed_with_accession.reference_aa == "M"
+    assert parsed_with_accession.position == 1
+    assert parsed_with_accession.alternate_aa == ""
+
+
+def test_auto_format_hgvs_p_string_with_dash_deletion() -> None:
+    """Test auto-formatting deletion strings with dash notation."""
+    assert rtv.auto_format_hgvs_p_string("A334-") == "p.A334del"
+    assert rtv.auto_format_hgvs_p_string("M1-") == "p.M1del"
+    assert rtv.auto_format_hgvs_p_string("  A334-  ") == "p.A334del"
+
+
+def test_single_mode_deletion_variant(runner: CliRunner, tmp_path: Path) -> None:
+    """Test reverse translation of a single amino acid deletion."""
+    output_path = tmp_path / "output.tsv"
+
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 9}
+    data_provider.get_seq.return_value = "ATGGCTAAA"  # Three codons = M, A, K
+
+    mocked_mapper = Mock()
+
+    with patch(
+        "src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect",
+        return_value=data_provider,
+    ), patch(
+        "src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper",
+        return_value=mocked_mapper,
+    ), patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--transcript",
+                "NM_TEST.1",
+                "--hgvs-p",
+                "p.A2del",  # Delete the Ala at position 2
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    
+    # Verify output contains a deletion variant
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 1
+    assert rows[0]["variant_type"] == "del"
+    assert "del" in rows[0]["hgvs_c"]
+
+
+def test_batch_mode_deletion_with_auto_format(runner: CliRunner, tmp_path: Path) -> None:
+    """Test batch mode with deletion auto-format from dash notation."""
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"id": "var1", "transcript": "NM_A.1", "hgvs_p": "M1-"},  # Deletion with dash
+            {"id": "var2", "transcript": "NM_B.1", "hgvs_p": "A2del"},  # Deletion already proper format
+        ],
+        fieldnames=["id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        return [
+            {
+                "variant_type": "del",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.1_3del",
+                "hgvs_g": "NC_000001.11:g.1_3del",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--auto-format-hgvs-p",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 2
+    assert rows[0]["variant_type"] == "del"
+    assert rows[1]["variant_type"] == "del"
+
+
+def test_batch_mode_accepts_csv_input_format(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input.csv"
+    output_path = tmp_path / "output.tsv"
+
+    write_csv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row2", "transcript": "NM_B.1", "hgvs_p": "p.Gly2="},
+        ],
+        fieldnames=["sample_id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        if kwargs["transcript_accession"] == "NM_A.1":
+            return [
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>G",
+                    "hgvs_g": "NC_000001.11:g.100A>G",
+                }
+            ]
+        return []
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--input-format",
+                "csv",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 2
+    assert rows[0]["hgvs_c"] == "NM_A.1:c.10A>G"
+    assert rows[0]["transcript"] == "NM_A.1"
+    assert rows[1]["transcript"] == "NM_B.1"
+    assert rows[1]["variant_type"] == ""
