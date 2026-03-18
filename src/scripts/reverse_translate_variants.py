@@ -1037,6 +1037,13 @@ def reverse_translate_batch_rows(
 	help="Batch mode: prefix for passed-through additional column names.",
 )
 @click.option(
+	"--skip",
+	default=0,
+	type=click.IntRange(min=0),
+	show_default=True,
+	help="Batch mode only: skip the first N input rows after the header.",
+)
+@click.option(
 	"--limit",
 	default=None,
 	type=click.IntRange(min=1),
@@ -1121,6 +1128,7 @@ def main(
 	pass_through_selected_columns: tuple[str, ...],
 	pass_through_all_columns: bool,
 	pass_through_prefix: str,
+	skip: int,
 	limit: int | None,
 	uniprot_target: str,
 	assembly: str,
@@ -1158,6 +1166,8 @@ def main(
 			raise click.ClickException("Single mode requires --hgvs-p.")
 		if limit is not None:
 			raise click.ClickException("--limit is only supported with --input.")
+		if skip != 0:
+			raise click.ClickException("--skip is only supported with --input.")
 
 		if auto_format_hgvs_p:
 			hgvs_protein = auto_format_hgvs_p_string(hgvs_protein)
@@ -1343,8 +1353,13 @@ def main(
 		total_rows_with_variants = 0
 		total_rows_with_errors = 0
 		total_rows_skipped_missing_hgvs_p = 0
+		total_rows_skipped_by_offset = 0
 
 		for row_index, row in enumerate(reader, start=1):
+			if row_index <= skip:
+				total_rows_skipped_by_offset += 1
+				continue
+
 			if limit is not None and total_input_rows >= limit:
 				break
 
@@ -1456,6 +1471,7 @@ def main(
 		click.echo(
 			"Batch reverse-translation summary: "
 			f"{total_input_rows} input rows, "
+			f"{total_rows_skipped_by_offset} rows skipped by --skip, "
 			f"{total_output_rows} output rows, "
 			f"{total_rows_with_variants} rows with >=1 variant, "
 			f"{total_rows_with_errors} rows with warnings/errors, "

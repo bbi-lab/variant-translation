@@ -253,6 +253,7 @@ python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs
 - `--include-indels`: Include codon-local insertion/deletion/delins candidates
 - `--use-inv-notation`: Express eligible reverse-complement delins as HGVS `inv` variants
 - `--substitutions-and-delins-only`: For premature stops, suppress length-changing insertion/deletion candidates
+- `--skip`: Batch mode only; skip the first N input rows after the header
 - `--max-indel-size`: Maximum insertion/deletion size in nucleotides (1-3)
 - `--limit`: Batch mode only; process at most the first N input rows
 - `--input-format`: Batch input format: `tsv` (default) or `csv`
@@ -310,6 +311,13 @@ To process only the first N rows in batch mode (after the header):
 
 ```bash
 python -m src.scripts.reverse_translate_variants --input input.tsv --limit 100 --output output.tsv
+```
+
+To skip the first N rows in batch mode (after the header), use `--skip N`. For example, `--skip 100` skips input
+lines 1 through 101 (header + first 100 records):
+
+```bash
+python -m src.scripts.reverse_translate_variants --input input.tsv --skip 100 --output output.tsv
 ```
 
 In UniProt batch mode, the script processes input rows as a stream and resolves UniProt IDs on demand, caching

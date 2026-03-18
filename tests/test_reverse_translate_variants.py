@@ -832,6 +832,131 @@ def test_batch_mode_limit_processes_first_n_rows(runner: CliRunner, tmp_path: Pa
     assert [row["transcript"] for row in rows] == ["NM_A.1", "NM_B.1"]
 
 
+def test_batch_mode_skip_skips_first_n_rows(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "skip_input.tsv"
+    output_path = tmp_path / "skip_output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row2", "transcript": "NM_B.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row3", "transcript": "NM_C.1", "hgvs_p": "p.Arg2His"},
+        ],
+        fieldnames=["sample_id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.10A>G",
+                "hgvs_g": "NC_000001.11:g.100A>G",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--skip",
+                "1",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 2
+    assert [row["transcript"] for row in rows] == ["NM_B.1", "NM_C.1"]
+
+
+def test_batch_mode_skip_is_applied_before_limit(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "skip_limit_input.tsv"
+    output_path = tmp_path / "skip_limit_output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "transcript": "NM_A.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row2", "transcript": "NM_B.1", "hgvs_p": "p.Arg2His"},
+            {"sample_id": "row3", "transcript": "NM_C.1", "hgvs_p": "p.Arg2His"},
+        ],
+        fieldnames=["sample_id", "transcript", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_reverse_translate(**kwargs):
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.10A>G",
+                "hgvs_g": "NC_000001.11:g.100A>G",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--skip",
+                "1",
+                "--limit",
+                "1",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 1
+    assert rows[0]["transcript"] == "NM_B.1"
+
+
+def test_single_mode_rejects_skip_option(runner: CliRunner) -> None:
+    result = runner.invoke(
+        rtv.main,
+        [
+            "--transcript",
+            "NM_TEST.1",
+            "--hgvs-p",
+            "p.Met1Val",
+            "--skip",
+            "1",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--skip is only supported with --input." in result.output
+
+
 def test_single_mode_one_row_per_input_joins_variants(runner: CliRunner) -> None:
     mocked_connect = Mock()
     mocked_mapper = Mock()
