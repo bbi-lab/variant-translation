@@ -29,6 +29,7 @@ Examples:
 """
 
 import csv
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -68,16 +69,32 @@ def split_joined_variants(
 	separator: str,
 	molecule_type: str,
 	ignore_reference_differences: bool,
+	normalize: Callable[[str], str] | None = None,
 ) -> set[str]:
+	"""Split a joined variant string into a set of normalised tokens.
+
+	If *normalize* is provided it is applied to each token before the optional
+	reference-prefix stripping, because HGVS normalisation requires the full
+	accession to look up the reference sequence.
+	"""
 	normalized_joined_variants = (joined_variants or "").strip()
 	if not normalized_joined_variants:
 		return set()
 
-	return {
-		normalize_hgvs_reference(token, molecule_type=molecule_type, ignore_reference_differences=ignore_reference_differences)
-		for token in normalized_joined_variants.split(separator)
-		if token.strip()
-	}
+	result: set[str] = set()
+	for token in normalized_joined_variants.split(separator):
+		stripped = token.strip()
+		if not stripped:
+			continue
+		if normalize is not None:
+			stripped = normalize(stripped)
+		stripped = normalize_hgvs_reference(
+			stripped,
+			molecule_type=molecule_type,
+			ignore_reference_differences=ignore_reference_differences,
+		)
+		result.add(stripped)
+	return result
 
 
 def ensure_required_columns(field_names: list[str], required_columns: list[str], label: str) -> None:
@@ -182,6 +199,7 @@ def rows_differ(
 	b_spec: InputSpec,
 	compare: str,
 	ignore_reference_differences: bool,
+	normalize: Callable[[str], str] | None = None,
 ) -> bool:
 	if compare in {"hgvs_c", "both"}:
 		a_hgvs_c = split_joined_variants(
@@ -189,12 +207,14 @@ def rows_differ(
 			separator=a_spec.separator,
 			molecule_type="c",
 			ignore_reference_differences=ignore_reference_differences,
+			normalize=normalize,
 		)
 		b_hgvs_c = split_joined_variants(
 			b_row.get(b_spec.hgvs_c_column, ""),
 			separator=b_spec.separator,
 			molecule_type="c",
 			ignore_reference_differences=ignore_reference_differences,
+			normalize=normalize,
 		)
 		if a_hgvs_c != b_hgvs_c:
 			return True
@@ -205,17 +225,58 @@ def rows_differ(
 			separator=a_spec.separator,
 			molecule_type="g",
 			ignore_reference_differences=ignore_reference_differences,
+			normalize=normalize,
 		)
 		b_hgvs_g = split_joined_variants(
 			b_row.get(b_spec.hgvs_g_column, ""),
 			separator=b_spec.separator,
 			molecule_type="g",
 			ignore_reference_differences=ignore_reference_differences,
+			normalize=normalize,
 		)
 		if a_hgvs_g != b_hgvs_g:
 			return True
 
 	return False
+
+
+def create_hgvs_normalizer() -> Callable[[str], str]:
+	"""Create and return an HGVS variant normaliser function.
+
+	Lazily imports the *hgvs* package and opens a UTA connection.  Only call
+	this when ``--normalize-indels`` is active — the import and connection are
+	intentionally deferred so they have no impact when the option is not used.
+
+	The returned callable accepts an HGVS variant string and returns its
+	normalised form.  If parsing or normalisation fails the original string is
+	returned unchanged so that comparison can still proceed.
+	"""
+	try:
+		import hgvs.parser
+		import hgvs.dataproviders.uta
+		import hgvs.normalizer
+	except ImportError as exc:
+		raise click.ClickException(
+			f"The hgvs package is required for --normalize-indels: {exc}"
+		)
+
+	try:
+		hp = hgvs.parser.Parser()
+		hdp = hgvs.dataproviders.uta.connect()
+		hn = hgvs.normalizer.Normalizer(hdp)
+	except Exception as exc:
+		raise click.ClickException(
+			f"Failed to initialise the HGVS normaliser (is UTA reachable?): {exc}"
+		)
+
+	def _normalize(variant_str: str) -> str:
+		try:
+			parsed = hp.parse(variant_str)
+			return str(hn.normalize(parsed))
+		except Exception:
+			return variant_str
+
+	return _normalize
 
 
 def build_prefixed_column_names(columns: list[str], prefix: str) -> dict[str, str]:
@@ -346,6 +407,20 @@ def write_tsv(path: Path, field_names: list[str], rows: list[dict[str, str]]) ->
 	type=click.Path(dir_okay=False, path_type=Path),
 	help="Output TSV for B rows missing transcript or hgvs_p.",
 )
+@click.option(
+	"--normalize-indels",
+	"normalize_indels",
+	is_flag=True,
+	default=False,
+	help=(
+		"Before comparing HGVS variants, normalise each one via the hgvs library. "
+		"This lets the comparison treat equivalent indel representations as equal "
+		"(e.g. a 2-NT deletion that is biologically the same as a 3-NT "
+		"deletion/insertion for a full-codon replacement). "
+		"Requires a reachable UTA database. "
+		"Has no performance impact when not specified."
+	),
+)
 def main(
 	a_input: Path,
 	b_input: Path,
@@ -377,11 +452,21 @@ def main(
 	different_output: Path,
 	a_missing_output: Path,
 	b_missing_output: Path,
+	normalize_indels: bool,
 ) -> None:
 	a_input_format = a_input_format.lower()
 	b_input_format = b_input_format.lower()
 	compare = compare.lower()
 	configure_csv_field_size_limit()
+
+	normalize_fn: Callable[[str], str] | None = None
+	if normalize_indels:
+		from dotenv import load_dotenv
+		load_dotenv()
+		click.echo("Initialising HGVS normaliser (connecting to UTA) …", err=True)
+		normalize_fn = create_hgvs_normalizer()
+		click.echo("HGVS normaliser ready.", err=True)
+
 	match_column_names = parse_column_list_option(match_columns, "--match-columns")
 	selected_pass_through_column_names = parse_column_list_option(
 		pass_through_selected_columns,
@@ -561,6 +646,7 @@ def main(
 			b_spec=b_spec,
 			compare=compare,
 			ignore_reference_differences=ignore_reference_differences,
+			normalize=normalize_fn,
 		):
 			continue
 

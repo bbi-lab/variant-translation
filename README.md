@@ -407,12 +407,18 @@ Key options:
 - Additional key columns for matching: `--match-columns` (comma-separated and repeatable)
 - Comparison scope: `--compare hgvs_c|hgvs_g|both`
 - Reference-insensitive comparison: `--ignore-reference-differences`
+- Indel-normalized comparison: `--normalize-indels` to normalize HGVS variants before comparison so equivalent indel/codon-replacement representations can match
 - Differences output pass-through:
    - `--pass-through-all-columns` for all non-core columns
    - `--pass-through-columns` for selected non-core columns from both A and B (comma-separated and repeatable)
    - `--a-pass-through-columns` and `--b-pass-through-columns` for input-specific selected non-core columns
    - `--a-pass-through-prefix` and `--b-pass-through-prefix` for output naming
 - Missing-key outputs: `--a-missing-output` and `--b-missing-output` for rows missing transcript or `hgvs_p`
+
+If one file represents an event as a short indel and the other represents the same biological change as a
+full-codon `delins`, use `--normalize-indels` to normalize each HGVS expression through the `hgvs` library before
+comparison. This is slower than the default exact-string comparison and requires access to UTA (and benefits from a
+local SeqRepo), so it is only enabled when explicitly requested.
 
 Example using separate pass-through selections for each input:
 
@@ -422,6 +428,20 @@ python -m src.scripts.compare_reverse_translated_variants \
    --b-input b.tsv \
    --a-pass-through-columns sample_id,plate_id \
    --b-pass-through-columns record_id,batch \
+   --a-only-output a_only.tsv \
+   --b-only-output b_only.tsv \
+   --different-output differences.tsv
+```
+
+Example allowing equivalent indel representations to match:
+
+```bash
+python -m src.scripts.compare_reverse_translated_variants \
+   --a-input a.tsv \
+   --b-input b.tsv \
+   --compare hgvs_c \
+   --ignore-reference-differences \
+   --normalize-indels \
    --a-only-output a_only.tsv \
    --b-only-output b_only.tsv \
    --different-output differences.tsv
