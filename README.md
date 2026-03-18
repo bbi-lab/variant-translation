@@ -178,6 +178,35 @@ Supported patterns: one-letter (e.g., `A334D`, `M1V`) and three-letter (e.g., `A
 codes; single stop codon changes (e.g., `*123C`); synonymous changes (e.g., `R175=`); and deletions (e.g., `A334del`,
 `A334-`, `Met1del`).
 
+### Compare Reverse-Translated Variant Files
+
+Compare two single-line reverse-translation files (A and B), matching rows by exact transcript + `hgvs_p` and
+reporting A-only keys, B-only keys, and rows where reverse translations differ.
+
+```bash
+python -m src.scripts.compare_reverse_translated_variants \
+   --a-input a.tsv \
+   --b-input b.tsv \
+   --a-only-output a_only.tsv \
+   --b-only-output b_only.tsv \
+   --different-output differences.tsv \
+   --a-missing-output a_missing.tsv \
+   --b-missing-output b_missing.tsv
+```
+
+Key options:
+- Per-file formats: `--a-input-format`, `--b-input-format` (`tsv`/`csv`)
+- Per-file single-line separators: `--a-separator`, `--b-separator`
+- Per-file column options: transcript, `hgvs_p`, `hgvs_c`, `hgvs_g`
+- Additional key columns for matching: `--match-columns` (comma-separated and repeatable)
+- Comparison scope: `--compare hgvs_c|hgvs_g|both`
+- Reference-insensitive comparison: `--ignore-reference-differences`
+- Differences output pass-through:
+   - `--pass-through-all-columns` for all non-core columns
+   - `--pass-through-columns` for selected non-core columns (comma-separated and repeatable)
+   - `--a-pass-through-prefix` and `--b-pass-through-prefix` for output naming
+- Missing-key outputs: `--a-missing-output` and `--b-missing-output` for rows missing transcript or `hgvs_p`
+
 ## Configuration
 
 ### UTA (Universal Transcript Archive)
