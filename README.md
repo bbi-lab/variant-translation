@@ -409,9 +409,23 @@ Key options:
 - Reference-insensitive comparison: `--ignore-reference-differences`
 - Differences output pass-through:
    - `--pass-through-all-columns` for all non-core columns
-   - `--pass-through-columns` for selected non-core columns (comma-separated and repeatable)
+   - `--pass-through-columns` for selected non-core columns from both A and B (comma-separated and repeatable)
+   - `--a-pass-through-columns` and `--b-pass-through-columns` for input-specific selected non-core columns
    - `--a-pass-through-prefix` and `--b-pass-through-prefix` for output naming
 - Missing-key outputs: `--a-missing-output` and `--b-missing-output` for rows missing transcript or `hgvs_p`
+
+Example using separate pass-through selections for each input:
+
+```bash
+python -m src.scripts.compare_reverse_translated_variants \
+   --a-input a.tsv \
+   --b-input b.tsv \
+   --a-pass-through-columns sample_id,plate_id \
+   --b-pass-through-columns record_id,batch \
+   --a-only-output a_only.tsv \
+   --b-only-output b_only.tsv \
+   --different-output differences.tsv
+```
 
 ## Configuration
 

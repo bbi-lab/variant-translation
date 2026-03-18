@@ -307,6 +307,123 @@ def test_compare_pass_through_columns_accepts_csv_list_and_repeats(runner: CliRu
     assert diff_rows[0]["b_extra_dataset"] == "set1"
 
 
+def test_compare_pass_through_columns_can_be_specified_separately_for_a_and_b(
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    a_input = tmp_path / "a.tsv"
+    b_input = tmp_path / "b.tsv"
+    a_only_output = tmp_path / "a_only.tsv"
+    b_only_output = tmp_path / "b_only.tsv"
+    different_output = tmp_path / "different.tsv"
+
+    write_delimited(
+        a_input,
+        rows=[
+            {
+                "a_note": "alpha",
+                "transcript": "NM_000020.1",
+                "hgvs_p": "p.Arg20His",
+                "hgvs_c": "c.20A>G",
+                "hgvs_g": "g.20A>G",
+            }
+        ],
+        fieldnames=["a_note", "transcript", "hgvs_p", "hgvs_c", "hgvs_g"],
+        delimiter="\t",
+    )
+
+    write_delimited(
+        b_input,
+        rows=[
+            {
+                "b_note": "beta",
+                "transcript": "NM_000020.1",
+                "hgvs_p": "p.Arg20His",
+                "hgvs_c": "c.20A>T",
+                "hgvs_g": "g.20A>G",
+            }
+        ],
+        fieldnames=["b_note", "transcript", "hgvs_p", "hgvs_c", "hgvs_g"],
+        delimiter="\t",
+    )
+
+    result = runner.invoke(
+        cmp.main,
+        [
+            "--a-input",
+            str(a_input),
+            "--b-input",
+            str(b_input),
+            "--compare",
+            "hgvs_c",
+            "--a-pass-through-columns",
+            "a_note",
+            "--b-pass-through-columns",
+            "b_note",
+            "--a-only-output",
+            str(a_only_output),
+            "--b-only-output",
+            str(b_only_output),
+            "--different-output",
+            str(different_output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+    diff_fields, diff_rows = read_tsv(different_output)
+    assert len(diff_rows) == 1
+    assert "a_extra_a_note" in diff_fields
+    assert "b_extra_b_note" in diff_fields
+    assert diff_rows[0]["a_extra_a_note"] == "alpha"
+    assert diff_rows[0]["b_extra_b_note"] == "beta"
+
+
+def test_compare_errors_when_a_pass_through_column_is_missing(runner: CliRunner, tmp_path: Path) -> None:
+    a_input = tmp_path / "a.tsv"
+    b_input = tmp_path / "b.tsv"
+    a_only_output = tmp_path / "a_only.tsv"
+    b_only_output = tmp_path / "b_only.tsv"
+    different_output = tmp_path / "different.tsv"
+
+    write_delimited(
+        a_input,
+        rows=[{"transcript": "NM_000020.1", "hgvs_p": "p.Arg20His", "hgvs_c": "c.20A>G"}],
+        fieldnames=["transcript", "hgvs_p", "hgvs_c"],
+        delimiter="\t",
+    )
+
+    write_delimited(
+        b_input,
+        rows=[{"transcript": "NM_000020.1", "hgvs_p": "p.Arg20His", "hgvs_c": "c.20A>T"}],
+        fieldnames=["transcript", "hgvs_p", "hgvs_c"],
+        delimiter="\t",
+    )
+
+    result = runner.invoke(
+        cmp.main,
+        [
+            "--a-input",
+            str(a_input),
+            "--b-input",
+            str(b_input),
+            "--compare",
+            "hgvs_c",
+            "--a-pass-through-columns",
+            "a_note",
+            "--a-only-output",
+            str(a_only_output),
+            "--b-only-output",
+            str(b_only_output),
+            "--different-output",
+            str(different_output),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Requested --a-pass-through-columns not found among non-core columns in A" in result.output
+
+
 def test_compare_match_columns_disambiguates_overlapping_variants(runner: CliRunner, tmp_path: Path) -> None:
     a_input = tmp_path / "a.tsv"
     b_input = tmp_path / "b.tsv"

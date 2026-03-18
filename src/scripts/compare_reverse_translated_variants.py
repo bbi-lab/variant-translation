@@ -107,6 +107,11 @@ def parse_column_list_option(raw_values: tuple[str, ...], option_name: str) -> l
 	return parsed_values
 
 
+def append_if_missing(values: list[str], value: str) -> None:
+	if value not in values:
+		values.append(value)
+
+
 def configure_csv_field_size_limit() -> None:
 	field_size_limit = sys.maxsize
 	while True:
@@ -280,7 +285,27 @@ def write_tsv(path: Path, field_names: list[str], rows: list[dict[str, str]]) ->
 	multiple=True,
 	type=str,
 	help=(
-		"Include selected non-core columns from A and/or B in differences output. "
+		"Include selected non-core columns from both A and B in differences output. "
+		"Accepts comma-separated values and may be repeated."
+	),
+)
+@click.option(
+	"--a-pass-through-columns",
+	"a_pass_through_selected_columns",
+	multiple=True,
+	type=str,
+	help=(
+		"Include selected non-core columns from A in differences output. "
+		"Accepts comma-separated values and may be repeated."
+	),
+)
+@click.option(
+	"--b-pass-through-columns",
+	"b_pass_through_selected_columns",
+	multiple=True,
+	type=str,
+	help=(
+		"Include selected non-core columns from B in differences output. "
 		"Accepts comma-separated values and may be repeated."
 	),
 )
@@ -342,6 +367,8 @@ def main(
 	a_prefix: str,
 	b_prefix: str,
 	pass_through_selected_columns: tuple[str, ...],
+	a_pass_through_selected_columns: tuple[str, ...],
+	b_pass_through_selected_columns: tuple[str, ...],
 	pass_through_all_columns: bool,
 	a_pass_through_prefix: str,
 	b_pass_through_prefix: str,
@@ -360,9 +387,22 @@ def main(
 		pass_through_selected_columns,
 		"--pass-through-columns",
 	)
-	if pass_through_all_columns and selected_pass_through_column_names:
+	a_selected_pass_through_column_names = parse_column_list_option(
+		a_pass_through_selected_columns,
+		"--a-pass-through-columns",
+	)
+	b_selected_pass_through_column_names = parse_column_list_option(
+		b_pass_through_selected_columns,
+		"--b-pass-through-columns",
+	)
+	if pass_through_all_columns and (
+		selected_pass_through_column_names
+		or a_selected_pass_through_column_names
+		or b_selected_pass_through_column_names
+	):
 		raise click.ClickException(
-			"--pass-through-all-columns cannot be combined with --pass-through-columns. Use one strategy."
+			"--pass-through-all-columns cannot be combined with --pass-through-columns, "
+			"--a-pass-through-columns, or --b-pass-through-columns. Use one strategy."
 		)
 
 	for option_name, option_value in (
@@ -444,10 +484,10 @@ def main(
 		for column_name in selected_pass_through_column_names:
 			found_in_at_least_one_input = False
 			if column_name in a_additional_columns:
-				a_selected_additional_columns.append(column_name)
+				append_if_missing(a_selected_additional_columns, column_name)
 				found_in_at_least_one_input = True
 			if column_name in b_additional_columns:
-				b_selected_additional_columns.append(column_name)
+				append_if_missing(b_selected_additional_columns, column_name)
 				found_in_at_least_one_input = True
 			if not found_in_at_least_one_input:
 				unknown_pass_through_columns.append(column_name)
@@ -458,14 +498,46 @@ def main(
 				+ ", ".join(unknown_pass_through_columns)
 			)
 
+		unknown_a_pass_through_columns = [
+			column_name
+			for column_name in a_selected_pass_through_column_names
+			if column_name not in a_additional_columns
+		]
+		if unknown_a_pass_through_columns:
+			raise click.ClickException(
+				"Requested --a-pass-through-columns not found among non-core columns in A: "
+				+ ", ".join(unknown_a_pass_through_columns)
+			)
+
+		unknown_b_pass_through_columns = [
+			column_name
+			for column_name in b_selected_pass_through_column_names
+			if column_name not in b_additional_columns
+		]
+		if unknown_b_pass_through_columns:
+			raise click.ClickException(
+				"Requested --b-pass-through-columns not found among non-core columns in B: "
+				+ ", ".join(unknown_b_pass_through_columns)
+			)
+
+		for column_name in a_selected_pass_through_column_names:
+			append_if_missing(a_selected_additional_columns, column_name)
+		for column_name in b_selected_pass_through_column_names:
+			append_if_missing(b_selected_additional_columns, column_name)
+
 	a_extra_column_map: dict[str, str] = {}
 	b_extra_column_map: dict[str, str] = {}
-	if pass_through_all_columns or selected_pass_through_column_names:
+	include_additional_columns = (
+		pass_through_all_columns
+		or bool(a_selected_additional_columns)
+		or bool(b_selected_additional_columns)
+	)
+	if include_additional_columns:
 		a_extra_column_map = build_prefixed_column_names(a_selected_additional_columns, a_pass_through_prefix)
 		b_extra_column_map = build_prefixed_column_names(b_selected_additional_columns, b_pass_through_prefix)
 
 	differences_field_names = list(a_column_map.values()) + list(b_column_map.values())
-	if pass_through_all_columns or selected_pass_through_column_names:
+	if include_additional_columns:
 		differences_field_names.extend(a_extra_column_map.values())
 		differences_field_names.extend(b_extra_column_map.values())
 
@@ -496,7 +568,7 @@ def main(
 			**{output_name: a_row.get(input_name, "") for input_name, output_name in a_column_map.items()},
 			**{output_name: b_row.get(input_name, "") for input_name, output_name in b_column_map.items()},
 		}
-		if pass_through_all_columns or selected_pass_through_column_names:
+		if include_additional_columns:
 			difference_row.update(
 				{output_name: a_row.get(input_name, "") for input_name, output_name in a_extra_column_map.items()}
 			)
