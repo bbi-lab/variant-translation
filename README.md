@@ -78,7 +78,8 @@ python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs
 - `--max-indel-size`: Maximum insertion/deletion size in nucleotides (1-3)
 - `--limit`: Batch mode only; process at most the first N input rows
 - `--input-format`: Batch input format: `tsv` (default) or `csv`
-- `--pass-through-columns`: Batch mode; pass through additional non-core input columns (default: off)
+- `--pass-through-all-columns`: Batch mode; pass through all additional non-core input columns
+- `--pass-through-columns`: Batch mode; pass through specific additional column(s) (comma-separated and repeatable)
 - `--pass-through-prefix`: Batch mode; prefix for passed-through additional column names
 - `--one-row-per-input`: Emit exactly one output row per input row by joining multiple candidates
 - `--join-delimiter`: Delimiter used with `--one-row-per-input` (default: `|`)
@@ -99,13 +100,23 @@ Rows with missing/blank `hgvs_p` values are skipped. If one or more rows are ski
 To pass through additional input columns, enable:
 
 ```bash
-python -m src.scripts.reverse_translate_variants --input input.tsv --pass-through-columns --output output.tsv
+python -m src.scripts.reverse_translate_variants --input input.tsv --pass-through-all-columns --output output.tsv
 ```
 
-To prefix passed-through additional column names:
+To pass through only selected additional columns:
 
 ```bash
-python -m src.scripts.reverse_translate_variants --input input.tsv --pass-through-columns --pass-through-prefix input_ --output output.tsv
+python -m src.scripts.reverse_translate_variants \
+   --input input.tsv \
+   --pass-through-columns sample_id,project_id \
+   --pass-through-columns plate_id \
+   --output output.tsv
+```
+
+To prefix passed-through additional column names (works with either strategy):
+
+```bash
+python -m src.scripts.reverse_translate_variants --input input.tsv --pass-through-all-columns --pass-through-prefix input_ --output output.tsv
 ```
 
 To drive batch mode from UniProt IDs instead of transcript accessions:

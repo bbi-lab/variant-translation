@@ -111,7 +111,7 @@ def test_join_variant_rows_keeps_aligned_counts() -> None:
     assert len(joined["hgvs_c"].split("|")) == len(joined["hgvs_g"].split("|"))
 
 
-def test_batch_mode_pass_through_columns_with_prefix(runner: CliRunner, tmp_path: Path) -> None:
+def test_batch_mode_pass_through_all_columns_with_prefix(runner: CliRunner, tmp_path: Path) -> None:
     input_path = tmp_path / "input.tsv"
     output_path = tmp_path / "output.tsv"
 
@@ -163,7 +163,7 @@ def test_batch_mode_pass_through_columns_with_prefix(runner: CliRunner, tmp_path
             [
                 "--input",
                 str(input_path),
-                "--pass-through-columns",
+                "--pass-through-all-columns",
                 "--pass-through-prefix",
                 "meta_",
                 "--output",
@@ -198,6 +198,135 @@ def test_batch_mode_pass_through_columns_with_prefix(runner: CliRunner, tmp_path
     assert rows[2]["variant_type"] == ""
     assert rows[2]["hgvs_c"] == ""
     assert rows[2]["hgvs_g"] == ""
+
+
+def test_batch_mode_pass_through_selected_columns_only(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {
+                "sample_id": "row1",
+                "note": "keep me",
+                "batch": "b1",
+                "transcript": "NM_A.1",
+                "hgvs_p": "p.Arg2His",
+            }
+        ],
+        fieldnames=["sample_id", "note", "batch", "transcript", "hgvs_p"],
+    )
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>G",
+                    "hgvs_g": "NC_000001.11:g.100A>G",
+                }
+            ],
+        ),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--pass-through-columns",
+                "sample_id",
+                "--pass-through-columns",
+                "batch",
+                "--pass-through-prefix",
+                "meta_",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 1
+    assert reader.fieldnames is not None
+    assert "meta_sample_id" in reader.fieldnames
+    assert "meta_batch" in reader.fieldnames
+    assert "meta_note" not in reader.fieldnames
+    assert rows[0]["meta_sample_id"] == "row1"
+    assert rows[0]["meta_batch"] == "b1"
+
+
+def test_batch_mode_pass_through_columns_accepts_csv_list_and_repeated_uses(
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {
+                "sample_id": "row1",
+                "note": "keep me",
+                "batch": "b1",
+                "plate": "p7",
+                "transcript": "NM_A.1",
+                "hgvs_p": "p.Arg2His",
+            }
+        ],
+        fieldnames=["sample_id", "note", "batch", "plate", "transcript", "hgvs_p"],
+    )
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_A.1:c.10A>G",
+                    "hgvs_g": "NC_000001.11:g.100A>G",
+                }
+            ],
+        ),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--pass-through-columns",
+                "sample_id,batch",
+                "--pass-through-columns",
+                "plate",
+                "--pass-through-prefix",
+                "meta_",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 1
+    assert reader.fieldnames is not None
+    assert "meta_sample_id" in reader.fieldnames
+    assert "meta_batch" in reader.fieldnames
+    assert "meta_plate" in reader.fieldnames
+    assert "meta_note" not in reader.fieldnames
 
 
 def test_batch_mode_does_not_pass_through_additional_columns_by_default(runner: CliRunner, tmp_path: Path) -> None:
@@ -498,7 +627,7 @@ def test_batch_mode_one_row_per_input_joins_variants(runner: CliRunner, tmp_path
             [
                 "--input",
                 str(input_path),
-                "--pass-through-columns",
+                "--pass-through-all-columns",
                 "--one-row-per-input",
                 "--join-delimiter",
                 "|",

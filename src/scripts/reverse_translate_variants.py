@@ -34,7 +34,7 @@ Examples:
 
   python -m src.scripts.reverse_translate_variants \
 	--input input.tsv \
-	--pass-through-columns \
+	--pass-through-all-columns \
 	--pass-through-prefix input_ \
 	--output reverse_translation_with_input_columns.tsv
 """
@@ -807,9 +807,19 @@ def join_variant_rows(
 )
 @click.option(
 	"--pass-through-columns",
+	"pass_through_selected_columns",
+	multiple=True,
+	type=str,
+	help=(
+		"Batch mode: specific additional input column(s) to pass through. "
+		"Accepts comma-separated values and may be repeated."
+	),
+)
+@click.option(
+	"--pass-through-all-columns",
 	is_flag=True,
 	default=False,
-	help="Batch mode: pass through additional non-core input columns.",
+	help="Batch mode: pass through all additional non-core input columns.",
 )
 @click.option(
 	"--pass-through-prefix",
@@ -886,7 +896,8 @@ def main(
 	transcript_column: str,
 	uniprot_column: str | None,
 	hgvs_p_column: str,
-	pass_through_columns: bool,
+	pass_through_selected_columns: tuple[str, ...],
+	pass_through_all_columns: bool,
 	pass_through_prefix: str,
 	limit: int | None,
 	uniprot_target: str,
@@ -908,8 +919,15 @@ def main(
 		raise click.ClickException("--join-delimiter cannot contain a tab character.")
 	if "\t" in pass_through_prefix:
 		raise click.ClickException("--pass-through-prefix cannot contain a tab character.")
-	if pass_through_prefix and not pass_through_columns:
-		raise click.ClickException("--pass-through-prefix requires --pass-through-columns.")
+	if pass_through_all_columns and pass_through_selected_columns:
+		raise click.ClickException(
+			"--pass-through-all-columns cannot be combined with --pass-through-columns. "
+			"Use one strategy."
+		)
+	if pass_through_prefix and not (pass_through_all_columns or pass_through_selected_columns):
+		raise click.ClickException(
+			"--pass-through-prefix requires --pass-through-all-columns or --pass-through-columns."
+		)
 
 	if input_path is None:
 		if not hgvs_protein:
@@ -1038,11 +1056,40 @@ def main(
 			column_name for column_name in reader.fieldnames if column_name not in core_input_columns
 		]
 
+		selected_passthrough_input_columns: list[str] = []
+		if pass_through_all_columns:
+			selected_passthrough_input_columns = list(additional_input_columns)
+		else:
+			seen_selected_passthrough_columns: set[str] = set()
+			for raw_column_group in pass_through_selected_columns:
+				for raw_column_name in raw_column_group.split(","):
+					column_name = raw_column_name.strip()
+					if not column_name:
+						raise click.ClickException(
+							"--pass-through-columns entries cannot be empty. "
+							"Use a comma-separated list like 'col1,col2'."
+						)
+					if column_name in seen_selected_passthrough_columns:
+						continue
+					seen_selected_passthrough_columns.add(column_name)
+					selected_passthrough_input_columns.append(column_name)
+
+			unknown_passthrough_columns = [
+				column_name
+				for column_name in selected_passthrough_input_columns
+				if column_name not in additional_input_columns
+			]
+			if unknown_passthrough_columns:
+				raise click.ClickException(
+					"Requested --pass-through-columns not found among additional input columns: "
+					+ ", ".join(unknown_passthrough_columns)
+				)
+
 		passthrough_output_name_by_input_column: dict[str, str] = {}
-		if pass_through_columns:
+		if selected_passthrough_input_columns:
 			seen_output_column_names: set[str] = set(core_input_columns)
 			seen_output_column_names.update({"variant_type", "hgvs_c", "hgvs_g"})
-			for additional_input_column in additional_input_columns:
+			for additional_input_column in selected_passthrough_input_columns:
 				passthrough_output_column = f"{pass_through_prefix}{additional_input_column}"
 				if passthrough_output_column in seen_output_column_names:
 					raise click.ClickException(
@@ -1056,7 +1103,7 @@ def main(
 		failed_uniprot_ids: set[str] = set()
 
 		field_names = list(core_input_columns)
-		if pass_through_columns:
+		if passthrough_output_name_by_input_column:
 			field_names.extend(passthrough_output_name_by_input_column.values())
 		for column_name in ("variant_type", "hgvs_c", "hgvs_g"):
 			if column_name not in field_names:
@@ -1077,7 +1124,7 @@ def main(
 
 			total_input_rows += 1
 			row_output_template = {column_name: (row.get(column_name) or "") for column_name in core_input_columns}
-			if pass_through_columns:
+			if passthrough_output_name_by_input_column:
 				for input_column_name, output_column_name in passthrough_output_name_by_input_column.items():
 					row_output_template[output_column_name] = row.get(input_column_name) or ""
 
