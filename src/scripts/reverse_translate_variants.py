@@ -176,7 +176,7 @@ AA_3_TO_1 = {
 
 
 HGVS_PROTEIN_RE = re.compile(
-    r"^(?:(?P<ac>[^:]+):)?p\.\(?(?P<ref>[A-Za-z\*]{1,4})(?P<pos>\d+)(?P<alt>[A-Za-z\*=]{1,4})\)?$"
+    r"^((?:(?P<ac>[^:]+):)?p\.)?\(?(?P<ref>[A-Za-z\*]{1,4})(?P<pos>\d+)(?P<alt>[A-Za-z\*=]{1,4})\)?$"
 )
 
 
@@ -226,7 +226,7 @@ def aa_token_to_one_letter(token: str) -> str:
 def parse_hgvs_protein_change(hgvs_p: str) -> ProteinChange:
     hgvs_normalized = hgvs_p.strip()
 
-    deletion_pattern = re.compile(r"^(?:(?P<ac>[^:]+):)?p\.\(?(?P<ref>[A-Za-z\*]{1,4})(?P<pos>\d+)del\)?$")
+    deletion_pattern = re.compile(r"^((?:(?P<ac>[^:]+):)?p\.)?\(?(?P<ref>[A-Za-z\*]{1,4})(?P<pos>\d+)(del|-)\)?$")
     deletion_match = deletion_pattern.match(hgvs_normalized)
     if deletion_match is not None:
         ref_token = deletion_match.group("ref")
