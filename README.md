@@ -283,21 +283,26 @@ python -m src.scripts.reverse_translate_variants --uniprot-id P04637 --hgvs-p p.
 
 **How transcript selection works**
 
-- **Single mode (`--input` not provided):** you must supply `--hgvs-p` and **exactly one** of
-   `--transcript` or `--uniprot-id`.
+- **Single mode (`--input` not provided):** you must supply `--hgvs-p` and exactly one transcript source:
+  `--transcript`, `--uniprot-id`, or `--use-hgvs-p-accession` with an accession-qualified HGVS p. value
+  (for example, `NP_000537.3:p.Arg175His`).
 - **Batch mode (`--input` provided):** the file must include `--hgvs-p-column` and at least one transcript source:
-   `--transcript-column` (default: `transcript`) and/or `--uniprot-column`.
+  `--transcript-column` (default: `transcript`), `--uniprot-column`, and/or `--use-hgvs-p-accession`
+  (which resolves from accession-qualified HGVS p. strings).
 - If both transcript and UniProt columns exist, each row uses the transcript value when present; UniProt resolution is
-   used as a fallback when transcript is blank.
-- Rows with neither a transcript nor a resolvable UniProt-derived transcript are written with empty variant fields and
-   a warning (and can be captured in `--errors`).
+  used as a fallback when transcript is blank.
+- If `--use-hgvs-p-accession` is enabled, row-level HGVS p. accession resolution is used as another fallback when
+  transcript is still blank.
+- Rows with neither a transcript nor a resolvable UniProt/HGVS-p-derived transcript are written with empty variant
+  fields and a warning (and can be captured in `--errors`).
 
 **Common transcript/UniProt mode errors**
 
 - `Single mode requires --hgvs-p.`
    - Add `--hgvs-p p.<change>` when running without `--input`.
-- `Single mode requires exactly one of --transcript or --uniprot-id, plus --hgvs-p.`
-   - In single mode, pass only one transcript source: either `--transcript` or `--uniprot-id`.
+- `Single mode requires --hgvs-p and exactly one transcript source: --transcript, --uniprot-id, or --use-hgvs-p-accession with an accession-qualified HGVS p. value.`
+   - In single mode, pass only one source. If using `--use-hgvs-p-accession`, provide HGVS p. values like
+     `NP_000537.3:p.Arg175His`.
 - `Missing transcript column in input ...` or `Missing transcript and UniProt columns in input ...`
    - In batch mode, ensure your header contains the column named by `--transcript-column` and/or
      `--uniprot-column`.
@@ -378,11 +383,13 @@ For those cases, the script will either reject the input as unparseable or, for
 stop-loss requests, report that the variant type is not supported.
 
 **Key options:**
-- `--transcript`: Single mode transcript accession (required in single mode unless using `--uniprot-id`)
+- `--transcript`: Single mode transcript accession
 - `--transcript-column`: Batch mode input column containing transcript accessions (default: `transcript`)
 - `--assembly`: Genome assembly for HGVS g. projection (default: `GRCh38`)
 - `--uniprot-id`: Resolve UniProt accession to a MANE Select identifier for single-variant mode
 - `--uniprot-column`: Batch mode input column for UniProt IDs used when transcript is blank/missing
+- `--use-hgvs-p-accession`: Resolve transcript accessions from accession-qualified HGVS p. strings
+   (for example, `NP_000537.3:p.Arg175His`) when transcript/UniProt are not supplied
 - `--uniprot-target`: UniProt MANE identifier source: `refseq-protein` (default) or `ensembl-transcript`
 - `--include-indels`: Include codon-local insertion/deletion/delins candidates
 - `--use-inv-notation`: Express eligible reverse-complement delins as HGVS `inv` variants
@@ -410,7 +417,10 @@ By default, batch mode reads transcript accessions from `transcript` and protein
 `--transcript-column` and `--hgvs-p-column`).
 
 If your file does not have transcript accessions, provide `--uniprot-column` so transcript IDs can be resolved from
-UniProt. At least one of `--transcript-column` or `--uniprot-column` must be present in the input header.
+UniProt, and/or enable `--use-hgvs-p-accession` to resolve from accession-qualified HGVS p. values.
+
+At least one transcript source must be available: `--transcript-column`, `--uniprot-column`, or
+`--use-hgvs-p-accession` with accession-qualified HGVS p. entries.
 
 The output includes core columns (`transcript`, optional `uniprot`, and `hgvs_p`) plus `variant_type`, `hgvs_c`, and
 `hgvs_g`.

@@ -39,6 +39,40 @@ def test_parse_hgvs_protein_change() -> None:
     assert parsed_synonymous.alternate_aa == "R"
 
 
+def test_resolve_transcript_from_refseq_protein_id_uses_provider_method_when_available() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_for_pro_ac.return_value = [["NM_000546.6", "NP_000537.3", "NCBI"]]
+
+    resolved = rtv.resolve_transcript_from_refseq_protein_id(data_provider, "NP_000537.3")
+
+    assert resolved == "NM_000546.6"
+    data_provider.get_tx_for_pro_ac.assert_called_once_with("NP_000537.3")
+
+
+def test_resolve_transcript_from_refseq_protein_id_falls_back_to_associated_accessions_query() -> None:
+    data_provider = Mock()
+    del data_provider.get_tx_for_pro_ac
+    data_provider._fetchall.return_value = [
+        ["NM_000546.6"],
+        ["XM_123.1"],
+    ]
+
+    resolved = rtv.resolve_transcript_from_refseq_protein_id(data_provider, "NP_000537.3")
+
+    assert resolved == "NM_000546.6"
+    data_provider._fetchall.assert_called_once()
+
+
+def test_resolve_transcript_from_refseq_protein_id_returns_none_when_fallback_query_fails() -> None:
+    data_provider = Mock()
+    del data_provider.get_tx_for_pro_ac
+    data_provider._fetchall.side_effect = RuntimeError("query failure")
+
+    resolved = rtv.resolve_transcript_from_refseq_protein_id(data_provider, "NP_000537.3")
+
+    assert resolved is None
+
+
 def test_reverse_translate_hgvs_p_with_mocked_data_provider() -> None:
     data_provider = Mock()
     data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
@@ -1238,6 +1272,58 @@ def test_single_mode_resolves_uniprot_id(runner: CliRunner) -> None:
     assert mocked_reverse_translate.call_count == 1
 
 
+def test_single_mode_resolves_transcript_from_hgvs_p_accession(runner: CliRunner) -> None:
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch(
+            "src.scripts.reverse_translate_variants.resolve_transcript_from_hgvs_p_accession",
+            return_value="NM_TEST.1",
+        ) as mocked_resolve_from_hgvs,
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            return_value=[
+                {
+                    "variant_type": "snv",
+                    "hgvs_c": "NM_TEST.1:c.1A>G",
+                    "hgvs_g": "NC_000001.11:g.1A>G",
+                }
+            ],
+        ) as mocked_reverse_translate,
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--hgvs-p",
+                "NP_000537.3:p.Met1Val",
+                "--use-hgvs-p-accession",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "NM_TEST.1" in result.output
+    assert "NM_TEST.1:c.1A>G" in result.output
+    assert mocked_resolve_from_hgvs.call_count == 1
+    assert mocked_reverse_translate.call_count == 1
+
+
+def test_single_mode_rejects_hgvs_accession_mode_without_accession_qualified_hgvs_p(runner: CliRunner) -> None:
+    result = runner.invoke(
+        rtv.main,
+        [
+            "--hgvs-p",
+            "p.Met1Val",
+            "--use-hgvs-p-accession",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Single mode requires --hgvs-p and exactly one transcript source" in result.output
+
+
 def test_batch_mode_resolves_unique_uniprot_ids_first(runner: CliRunner, tmp_path: Path) -> None:
     input_path = tmp_path / "input_uniprot.tsv"
     output_path = tmp_path / "output_uniprot.tsv"
@@ -1303,6 +1389,72 @@ def test_batch_mode_resolves_unique_uniprot_ids_first(runner: CliRunner, tmp_pat
     assert rows[0]["hgvs_c"] == "NM_000546.6:c.1A>G"
     assert rows[1]["hgvs_c"] == "NM_000546.6:c.1A>G"
     assert rows[2]["hgvs_c"] == "NM_000059.4:c.1A>G"
+
+
+def test_batch_mode_resolves_unique_hgvs_p_accessions_first(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input_hgvs_accession.tsv"
+    output_path = tmp_path / "output_hgvs_accession.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"sample_id": "row1", "hgvs_p": "NP_000537.3:p.Arg175His"},
+            {"sample_id": "row2", "hgvs_p": "NP_000537.3:p.Arg175His"},
+            {"sample_id": "row3", "hgvs_p": "NP_001381512.1:p.Gly2Asp"},
+        ],
+        fieldnames=["sample_id", "hgvs_p"],
+    )
+
+    mocked_connect = Mock()
+    mocked_mapper = Mock()
+
+    def mocked_resolve_from_hgvs(**kwargs):
+        if kwargs["hgvs_protein"].startswith("NP_000537.3"):
+            return "NM_000546.6"
+        if kwargs["hgvs_protein"].startswith("NP_001381512.1"):
+            return "NM_001394583.1"
+        raise AssertionError(f"Unexpected HGVS p value in test: {kwargs['hgvs_protein']}")
+
+    def mocked_reverse_translate(**kwargs):
+        return [
+            {
+                "variant_type": "snv",
+                "hgvs_c": f"{kwargs['transcript_accession']}:c.1A>G",
+                "hgvs_g": "NC_000001.11:g.1A>G",
+            }
+        ]
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=mocked_connect),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=mocked_mapper),
+        patch(
+            "src.scripts.reverse_translate_variants.resolve_transcript_from_hgvs_p_accession",
+            side_effect=mocked_resolve_from_hgvs,
+        ) as mocked_resolve_from_hgvs_fn,
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--use-hgvs-p-accession",
+                "--output",
+                str(output_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mocked_resolve_from_hgvs_fn.call_count == 2
+
+    with output_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+
+    assert len(rows) == 3
+    assert rows[0]["hgvs_c"] == "NM_000546.6:c.1A>G"
+    assert rows[1]["hgvs_c"] == "NM_000546.6:c.1A>G"
+    assert rows[2]["hgvs_c"] == "NM_001394583.1:c.1A>G"
 
 
 def test_auto_format_hgvs_p_string_with_substitution() -> None:

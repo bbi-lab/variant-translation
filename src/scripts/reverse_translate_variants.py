@@ -9,9 +9,10 @@ same protein-level change.
 Output is tab-separated with both HGVS c. and HGVS g. expressions.
 
 Mode requirements:
-	- Single mode (no --input): requires --hgvs-p plus exactly one of --transcript or --uniprot-id.
-	- Batch mode (--input): requires --hgvs-p-column and at least one transcript source column,
-		either --transcript-column and/or --uniprot-column.
+        - Single mode (no --input): requires --hgvs-p plus exactly one transcript source:
+            --transcript, --uniprot-id, or --use-hgvs-p-accession with an accession-qualified HGVS p. string.
+        - Batch mode (--input): requires --hgvs-p-column and at least one transcript source:
+            --transcript-column, --uniprot-column, and/or --use-hgvs-p-accession.
 
 Examples:
   python -m src.scripts.reverse_translate_variants \
@@ -21,6 +22,10 @@ Examples:
   python -m src.scripts.reverse_translate_variants \
 	--uniprot-id P04637 \
 	--hgvs-p p.Arg175His
+
+  python -m src.scripts.reverse_translate_variants \
+    --hgvs-p NP_000537.3:p.Arg175His \
+    --use-hgvs-p-accession
 
   python -m src.scripts.reverse_translate_variants \
 	--transcript NM_000546.6 \
@@ -599,18 +604,98 @@ def first_transcript_accession_from_protein_mapping_result(mapping_result: Any) 
 
 
 def resolve_transcript_from_refseq_protein_id(data_provider: Any, refseq_protein_id: str) -> str | None:
-    if not hasattr(data_provider, "get_tx_for_pro_ac"):
+    if hasattr(data_provider, "get_tx_for_pro_ac"):
+        try:
+            mapping_result = data_provider.get_tx_for_pro_ac(refseq_protein_id)
+        except Exception:
+            mapping_result = None
+
+        resolved_transcript = first_transcript_accession_from_protein_mapping_result(mapping_result)
+        if resolved_transcript:
+            return resolved_transcript
+
+    # Compatibility fallback for hgvs versions/providers without get_tx_for_pro_ac.
+    # associated_accessions maps protein accessions (pro_ac) to transcript accessions (tx_ac).
+    if not hasattr(data_provider, "_fetchall"):
         return None
 
     try:
-        mapping_result = data_provider.get_tx_for_pro_ac(refseq_protein_id)
+        rows = data_provider._fetchall(
+            """
+            SELECT tx_ac
+            FROM associated_accessions
+            WHERE pro_ac = %s
+            ORDER BY
+                CASE
+                    WHEN tx_ac LIKE 'NM_%%' THEN 0
+                    WHEN tx_ac LIKE 'NR_%%' THEN 1
+                    WHEN tx_ac LIKE 'XM_%%' THEN 2
+                    WHEN tx_ac LIKE 'XR_%%' THEN 3
+                    WHEN tx_ac LIKE 'ENST%%' THEN 4
+                    ELSE 9
+                END,
+                COALESCE(NULLIF(split_part(tx_ac, '.', 2), ''), '0')::int DESC,
+                tx_ac
+            """,
+            [refseq_protein_id],
+        )
     except Exception:
         return None
 
-    return first_transcript_accession_from_protein_mapping_result(mapping_result)
+    for row in rows:
+        if not row:
+            continue
+        candidate = str(row[0])
+        if looks_like_transcript_accession(candidate):
+            print(candidate)
+            return candidate
+
+    return None
+
+
+def extract_hgvs_protein_accession(hgvs_protein: str) -> str | None:
+    normalized_hgvs_protein = (hgvs_protein or "").strip()
+    if not normalized_hgvs_protein or ":" not in normalized_hgvs_protein:
+        return None
+
+    accession, remainder = normalized_hgvs_protein.split(":", 1)
+    if not accession or not remainder.startswith("p."):
+        return None
+
+    return accession.strip()
+
+
+def resolve_transcript_from_hgvs_p_accession(data_provider: Any, hgvs_protein: str) -> str:
+    protein_accession = extract_hgvs_protein_accession(hgvs_protein)
+    if not protein_accession:
+        raise click.ClickException(
+            "HGVS p. string does not include an accession prefix. "
+            "Use a value like 'NP_000537.3:p.Arg175His'."
+        )
+
+    if looks_like_transcript_accession(protein_accession):
+        return protein_accession
+
+    resolved_transcript = resolve_transcript_from_refseq_protein_id(
+        data_provider=data_provider,
+        refseq_protein_id=protein_accession,
+    )
+    if not resolved_transcript:
+        raise click.ClickException(
+            f"Unable to resolve a transcript accession from HGVS p. accession {protein_accession}."
+        )
+
+    return resolved_transcript
 
 
 def fetch_uniprot_mane_select_cross_reference(uniprot_id: str) -> ManeSelectCrossReference:
+    # if uniprot_id == "Q8IVT5":
+    #     return ManeSelectCrossReference(
+    #         ensembl_transcript_id="ENST00000644974.2",
+    #         refseq_protein_id="NP_001381512.1",
+    #         refseq_nucleotide_id="NM_001394583.1",
+    #     )
+
     request_url = UNIPROT_MANE_API_TEMPLATE.format(uniprot_id=uniprot_id)
 
     try:
@@ -1001,6 +1086,15 @@ def reverse_translate_batch_rows(
 )
 @click.option("--hgvs-p", "hgvs_protein", required=False, type=str, help="Protein HGVS string, e.g. p.Gly12Asp.")
 @click.option(
+    "--use-hgvs-p-accession",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow transcript resolution from accession-qualified HGVS p. strings "
+        "(e.g., NP_000537.3:p.Arg175His) when transcript/UniProt input is not supplied."
+    ),
+)
+@click.option(
     "--input",
     "input_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -1154,6 +1248,7 @@ def main(
     transcript_accession: str | None,
     uniprot_id: str | None,
     hgvs_protein: str | None,
+    use_hgvs_p_accession: bool,
     input_path: Path | None,
     input_format: str,
     transcript_column: str,
@@ -1216,9 +1311,12 @@ def main(
 
         has_transcript = bool((transcript_accession or "").strip())
         has_uniprot = bool((uniprot_id or "").strip())
-        if has_transcript == has_uniprot:
+        has_hgvs_accession_source = bool(extract_hgvs_protein_accession(hgvs_protein)) if use_hgvs_p_accession else False
+        source_count = int(has_transcript) + int(has_uniprot) + int(has_hgvs_accession_source)
+        if source_count != 1:
             raise click.ClickException(
-                "Single mode requires exactly one of --transcript or --uniprot-id, plus --hgvs-p."
+                "Single mode requires --hgvs-p and exactly one transcript source: "
+                "--transcript, --uniprot-id, or --use-hgvs-p-accession with an accession-qualified HGVS p. value."
             )
 
     data_provider = hgvs.dataproviders.uta.connect()
@@ -1231,17 +1329,31 @@ def main(
     )
     transcript_cache: dict[str, tuple[str, str]] = {}
     uniprot_cache: dict[str, str] = {}
+    hgvs_accession_cache: dict[str, str] = {}
 
     if input_path is None:
         resolved_transcript_accession = (transcript_accession or "").strip()
         if not resolved_transcript_accession:
-            assert uniprot_id is not None
-            resolved_transcript_accession = resolve_uniprot_id_to_transcript_accession(
-                uniprot_id=uniprot_id,
-                uniprot_target=uniprot_target,
-                data_provider=data_provider,
-                uniprot_cache=uniprot_cache,
-            )
+            normalized_uniprot_id = (uniprot_id or "").strip()
+            if normalized_uniprot_id:
+                resolved_transcript_accession = resolve_uniprot_id_to_transcript_accession(
+                    uniprot_id=normalized_uniprot_id,
+                    uniprot_target=uniprot_target,
+                    data_provider=data_provider,
+                    uniprot_cache=uniprot_cache,
+                )
+            else:
+                assert hgvs_protein is not None
+                hgvs_accession = extract_hgvs_protein_accession(hgvs_protein)
+                assert hgvs_accession is not None
+                if hgvs_accession in hgvs_accession_cache:
+                    resolved_transcript_accession = hgvs_accession_cache[hgvs_accession]
+                else:
+                    resolved_transcript_accession = resolve_transcript_from_hgvs_p_accession(
+                        data_provider=data_provider,
+                        hgvs_protein=hgvs_protein,
+                    )
+                    hgvs_accession_cache[hgvs_accession] = resolved_transcript_accession
 
         assert hgvs_protein is not None
 
@@ -1311,7 +1423,7 @@ def main(
         has_transcript_column = transcript_column in reader.fieldnames
         has_uniprot_column = bool(uniprot_column) and uniprot_column in reader.fieldnames
 
-        if not has_transcript_column and not has_uniprot_column:
+        if not has_transcript_column and not has_uniprot_column and not use_hgvs_p_accession:
             if not uniprot_column:
                 raise click.ClickException(
                     f"Missing transcript column in input {input_format.upper()}: {transcript_column}"
@@ -1378,6 +1490,8 @@ def main(
 
         resolved_transcript_by_uniprot_id: dict[str, str] = {}
         failed_uniprot_ids: set[str] = set()
+        resolved_transcript_by_hgvs_accession: dict[str, str] = {}
+        failed_hgvs_accessions: set[str] = set()
 
         field_names = list(core_input_columns)
         if passthrough_output_name_by_input_column:
@@ -1426,6 +1540,11 @@ def main(
             row_transcript = (row.get(transcript_column) or "").strip() if has_transcript_column else ""
             row_uniprot_id = (row.get(uniprot_column) or "").strip() if has_uniprot_column and uniprot_column else ""
             row_uniprot_resolution_error: str | None = None
+            row_hgvs_accession_resolution_error: str | None = None
+
+            row_hgvs_p = (row.get(hgvs_p_column) or "").strip()
+            if auto_format_hgvs_p:
+                row_hgvs_p = auto_format_hgvs_p_string(row_hgvs_p)
 
             if not row_transcript and row_uniprot_id:
                 if row_uniprot_id in resolved_transcript_by_uniprot_id:
@@ -1449,9 +1568,38 @@ def main(
                 if has_transcript_column:
                     row_output_template[transcript_column] = row_transcript
 
-            row_hgvs_p = (row.get(hgvs_p_column) or "").strip()
-            if auto_format_hgvs_p:
-                row_hgvs_p = auto_format_hgvs_p_string(row_hgvs_p)
+            if not row_transcript and use_hgvs_p_accession and row_hgvs_p:
+                row_hgvs_accession = extract_hgvs_protein_accession(row_hgvs_p)
+                if row_hgvs_accession:
+                    if row_hgvs_accession in resolved_transcript_by_hgvs_accession:
+                        row_transcript = resolved_transcript_by_hgvs_accession[row_hgvs_accession]
+                    elif row_hgvs_accession not in failed_hgvs_accessions:
+                        try:
+                            row_transcript = resolve_transcript_from_hgvs_p_accession(
+                                data_provider=data_provider,
+                                hgvs_protein=row_hgvs_p,
+                            )
+                            resolved_transcript_by_hgvs_accession[row_hgvs_accession] = row_transcript
+                        except Exception as exception:
+                            failed_hgvs_accessions.add(row_hgvs_accession)
+                            row_hgvs_accession_resolution_error = (
+                                f"Failed to resolve HGVS p. accession {row_hgvs_accession} ({exception})."
+                            )
+                            click.echo(
+                                f"Warning: {row_hgvs_accession_resolution_error}",
+                                err=True,
+                            )
+                else:
+                    row_hgvs_accession_resolution_error = (
+                        "HGVS p. value has no accession prefix for --use-hgvs-p-accession resolution."
+                    )
+                    click.echo(
+                        f"Warning: {row_hgvs_accession_resolution_error}",
+                        err=True,
+                    )
+
+                if row_transcript and has_transcript_column:
+                    row_output_template[transcript_column] = row_transcript
 
             if not row_hgvs_p:
                 total_rows_skipped_missing_hgvs_p += 1
@@ -1463,6 +1611,8 @@ def main(
                 )
                 if row_uniprot_resolution_error is not None:
                     error_message = f"{row_uniprot_resolution_error} {error_message}"
+                if row_hgvs_accession_resolution_error is not None:
+                    error_message = f"{row_hgvs_accession_resolution_error} {error_message}"
                 click.echo(
                     f"Warning: {error_message}",
                     err=True,
