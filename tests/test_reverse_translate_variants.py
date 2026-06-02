@@ -73,6 +73,88 @@ def test_resolve_transcript_from_refseq_protein_id_returns_none_when_fallback_qu
     assert resolved is None
 
 
+def test_build_nonadjacent_g_multivariant_returns_semicolon_joined_allele() -> None:
+    result = rtv.build_nonadjacent_g_multivariant(
+        [
+            "NC_000017.11:g.7670610T>G",
+            "NC_000017.11:g.7669690G>C",
+        ]
+    )
+
+    assert result == "NC_000017.11:g.[7669690G>C;7670610T>G]"
+
+
+def test_build_nonadjacent_g_multivariant_skips_adjacent_substitutions() -> None:
+    result = rtv.build_nonadjacent_g_multivariant(
+        [
+            "NC_000001.11:g.100A>G",
+            "NC_000001.11:g.101C>T",
+        ]
+    )
+
+    assert result is None
+
+
+def test_map_component_substitutions_to_g_multivariant_uses_component_mappings() -> None:
+    def mocked_map(parser, mapper, tx, hgvs_c):
+        if hgvs_c == "c.1099A>C":
+            return "NC_000017.11:g.7670610T>G"
+        if hgvs_c == "c.1101C>G":
+            return "NC_000017.11:g.7669690G>C"
+        raise AssertionError(f"Unexpected component mapping request in test: {hgvs_c}")
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=mocked_map,
+    ):
+        result = rtv.map_component_substitutions_to_g_multivariant(
+            parser=Mock(),
+            mapper=Mock(),
+            transcript_accession="NM_000546.6",
+            component_substitutions=((1099, "A", "C"), (1101, "C", "G")),
+        )
+
+    assert result == "NC_000017.11:g.[7669690G>C;7670610T>G]"
+
+
+def test_reverse_translate_end_to_end_rewrites_delins_to_g_multivariant_when_components_are_nonadjacent() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "GCT"  # Ala codon
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    def mocked_map(parser, mapper, tx, hgvs_c):
+        if hgvs_c == "c.1_2delinsCT":
+            return "NC_000017.11:g.7669690_7670610delinsTC"
+        if hgvs_c == "c.1G>C":
+            return "NC_000017.11:g.7670610T>G"
+        if hgvs_c == "c.2C>T":
+            return "NC_000017.11:g.7669690G>C"
+        return f"GENOMIC:{tx}:{hgvs_c}"
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=mocked_map,
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Ala1Leu",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    delins_row = next(row for row in rows if row["hgvs_c"] == "NM_TEST.1:c.1_2delinsCT")
+    assert delins_row["hgvs_g"] == "NC_000017.11:g.[7669690G>C;7670610T>G]"
+
+
 def test_reverse_translate_hgvs_p_with_mocked_data_provider() -> None:
     data_provider = Mock()
     data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}

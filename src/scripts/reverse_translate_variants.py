@@ -199,6 +199,7 @@ class ProteinChange:
 class CandidateVariant:
     variant_type: str
     hgvs_c: str
+    component_substitutions: tuple[tuple[int, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -417,6 +418,28 @@ def hgvs_c_for_delins_or_inv(
     return "delins", hgvs_c_for_indel(codon_c_start, codon_offset, deleted_length, inserted_sequence)
 
 
+def delins_component_substitutions(
+    codon_c_start: int,
+    codon_offset: int,
+    deleted_sequence: str,
+    inserted_sequence: str,
+) -> tuple[tuple[int, str, str], ...]:
+    if len(deleted_sequence) != len(inserted_sequence):
+        return ()
+
+    component_substitutions: list[tuple[int, str, str]] = []
+    first_c_position = codon_c_start + codon_offset
+    for index, (reference_nt, alternate_nt) in enumerate(zip(deleted_sequence, inserted_sequence)):
+        if reference_nt == alternate_nt:
+            continue
+        component_substitutions.append((first_c_position + index, reference_nt, alternate_nt))
+
+    if len(component_substitutions) < 2:
+        return ()
+
+    return tuple(component_substitutions)
+
+
 def enumerate_snv_candidates(
     coding_sequence: str,
     codon_sequence: str,
@@ -557,7 +580,22 @@ def enumerate_indel_candidates(
                         trimmed_inserted_sequence,
                         use_inv_notation=use_inv_notation,
                     )
-                    candidates.append(CandidateVariant(variant_type=variant_type, hgvs_c=hgvs_c))
+                    component_substitutions = ()
+                    if variant_type == "delins":
+                        component_substitutions = delins_component_substitutions(
+                            codon_c_start,
+                            trimmed_codon_offset,
+                            trimmed_deleted_sequence,
+                            trimmed_inserted_sequence,
+                        )
+
+                    candidates.append(
+                        CandidateVariant(
+                            variant_type=variant_type,
+                            hgvs_c=hgvs_c,
+                            component_substitutions=component_substitutions,
+                        )
+                    )
 
     return candidates
 
@@ -571,6 +609,62 @@ def map_hgvs_c_to_hgvs_g(
     variant_c = parser.parse_hgvs_variant(f"{transcript_accession}:{hgvs_c}")
     variant_g = mapper.c_to_g(variant_c)
     return str(variant_g)
+
+
+HGVS_G_SNV_RE = re.compile(r"^(?P<ac>[^:]+):g\.(?P<pos>\d+)(?P<ref>[ACGT])>(?P<alt>[ACGT])$")
+
+
+def build_nonadjacent_g_multivariant(g_substitutions: list[str]) -> str | None:
+    if len(g_substitutions) < 2:
+        return None
+
+    parsed_substitutions: list[tuple[str, int, str]] = []
+    for g_substitution in g_substitutions:
+        match = HGVS_G_SNV_RE.match(g_substitution)
+        if match is None:
+            return None
+        parsed_substitutions.append(
+            (
+                match.group("ac"),
+                int(match.group("pos")),
+                f"{match.group('pos')}{match.group('ref')}>{match.group('alt')}",
+            )
+        )
+
+    accessions = {accession for accession, _, _ in parsed_substitutions}
+    if len(accessions) != 1:
+        return None
+
+    sorted_positions = sorted(position for _, position, _ in parsed_substitutions)
+    has_nonadjacent_gap = any(
+        right_position - left_position > 1
+        for left_position, right_position in zip(sorted_positions, sorted_positions[1:])
+    )
+    if not has_nonadjacent_gap:
+        return None
+
+    accession = parsed_substitutions[0][0]
+    sorted_components = [component for _, _, component in sorted(parsed_substitutions, key=lambda item: item[1])]
+    return f"{accession}:g.[{';'.join(sorted_components)}]"
+
+
+def map_component_substitutions_to_g_multivariant(
+    parser: hgvs.parser.Parser,
+    mapper: hgvs.assemblymapper.AssemblyMapper,
+    transcript_accession: str,
+    component_substitutions: tuple[tuple[int, str, str], ...],
+) -> str | None:
+    g_substitutions: list[str] = []
+    for c_position, reference_nt, alternate_nt in component_substitutions:
+        g_substitution = map_hgvs_c_to_hgvs_g(
+            parser,
+            mapper,
+            transcript_accession,
+            f"c.{c_position}{reference_nt}>{alternate_nt}",
+        )
+        g_substitutions.append(g_substitution)
+
+    return build_nonadjacent_g_multivariant(g_substitutions)
 
 
 def looks_like_transcript_accession(accession: str) -> bool:
@@ -647,7 +741,6 @@ def resolve_transcript_from_refseq_protein_id(data_provider: Any, refseq_protein
             continue
         candidate = str(row[0])
         if looks_like_transcript_accession(candidate):
-            print(candidate)
             return candidate
 
     return None
@@ -931,6 +1024,16 @@ def reverse_translate_hgvs_p(
                 transcript_accession,
                 candidate_variant.hgvs_c,
             )
+
+            if candidate_variant.component_substitutions:
+                hgvs_g_multivariant = map_component_substitutions_to_g_multivariant(
+                    parser,
+                    mapper,
+                    transcript_accession,
+                    candidate_variant.component_substitutions,
+                )
+                if hgvs_g_multivariant is not None:
+                    hgvs_g = hgvs_g_multivariant
         except Exception as exception:
             click.echo(
                 f"Warning: Failed to map {transcript_accession}:{candidate_variant.hgvs_c} to HGVS g. ({exception})",
