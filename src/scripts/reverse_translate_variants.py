@@ -184,6 +184,8 @@ HGVS_PROTEIN_RE = re.compile(
     r"^((?:(?P<ac>[^:]+):)?p\.)?\(?(?P<ref>[A-Za-z\*]{1,4})(?P<pos>\d+)(?P<alt>[A-Za-z\*=]{1,4})\)?$"
 )
 
+HGVS_PROTEIN_ALLELE_RE = re.compile(r"^(?:(?P<ac>[^:]+):)?p\.\[(?P<changes>.+)\]$")
+
 
 UNIPROT_MANE_API_TEMPLATE = "https://rest.uniprot.org/uniprotkb/{uniprot_id}?fields=xref_mane-select"
 
@@ -254,6 +256,25 @@ def parse_hgvs_protein_change(hgvs_p: str) -> ProteinChange:
     alternate_aa = reference_aa if alt_token == "=" else aa_token_to_one_letter(alt_token)
 
     return ProteinChange(reference_aa=reference_aa, position=position, alternate_aa=alternate_aa)
+
+
+def parse_protein_multivariant(hgvs_p: str) -> list[ProteinChange]:
+    normalized = hgvs_p.strip()
+    match = HGVS_PROTEIN_ALLELE_RE.match(normalized)
+    if match:
+        changes_str = match.group("changes")
+        components = [c.strip() for c in changes_str.split(";") if c.strip()]
+        if not components:
+            raise click.ClickException(f"Empty multivariant specification: {hgvs_p}")
+        return [parse_hgvs_protein_change(f"p.{c}") for c in components]
+    return [parse_hgvs_protein_change(normalized)]
+
+
+def are_aa_positions_consecutive(protein_changes: list[ProteinChange]) -> bool:
+    if len(protein_changes) <= 1:
+        return True
+    positions = sorted(pc.position for pc in protein_changes)
+    return all(positions[i + 1] - positions[i] == 1 for i in range(len(positions) - 1))
 
 
 def translate_cds(coding_sequence: str) -> str:
@@ -667,6 +688,56 @@ def map_component_substitutions_to_g_multivariant(
     return build_nonadjacent_g_multivariant(g_substitutions)
 
 
+HGVS_G_ALLELE_INNER_RE = re.compile(r"^(?P<ac>[^:]+):g\.\[(?P<parts>.+)\]$")
+HGVS_G_SINGLE_VARIANT_RE = re.compile(r"^(?P<ac>[^:]+):g\.(?P<part>[^\[].+)$")
+
+
+def flatten_g_variant_parts(hgvs_g: str) -> tuple[str, list[str]] | None:
+    allele_match = HGVS_G_ALLELE_INNER_RE.match(hgvs_g)
+    if allele_match:
+        parts = [p.strip() for p in allele_match.group("parts").split(";")]
+        return allele_match.group("ac"), parts
+    single_match = HGVS_G_SINGLE_VARIANT_RE.match(hgvs_g)
+    if single_match:
+        return single_match.group("ac"), [single_match.group("part")]
+    return None
+
+
+def g_part_start_position(variant_part: str) -> int:
+    match = re.match(r"^(\d+)", variant_part)
+    return int(match.group(1)) if match else 0
+
+
+def build_g_allele(g_variants: list[str]) -> str | None:
+    if not g_variants:
+        return None
+    if len(g_variants) == 1:
+        return g_variants[0]
+    accession: str | None = None
+    all_parts: list[str] = []
+    for gv in g_variants:
+        if not gv:
+            return None
+        parsed = flatten_g_variant_parts(gv)
+        if parsed is None:
+            return None
+        ac, parts = parsed
+        if accession is None:
+            accession = ac
+        elif accession != ac:
+            return None
+        all_parts.extend(parts)
+    if not all_parts or accession is None:
+        return None
+    sorted_parts = sorted(all_parts, key=g_part_start_position)
+    return f"{accession}:g.[{';'.join(sorted_parts)}]"
+
+
+def c_variant_start_position(hgvs_c_local: str) -> int:
+    match = re.match(r"^c\.(\d+)", hgvs_c_local)
+    return int(match.group(1)) if match else 0
+
+
 def looks_like_transcript_accession(accession: str) -> bool:
     return bool(re.match(r"^(?:NM_|NR_|XM_|XR_|ENST|LRG_)", accession))
 
@@ -932,6 +1003,129 @@ def get_coding_sequence_and_reference_protein(
     return coding_sequence, reference_protein
 
 
+def reverse_translate_multivariant_hgvs_p(
+    transcript_accession: str,
+    protein_changes: list[ProteinChange],
+    include_indels: bool,
+    max_indel_size: int,
+    strict_ref_aa: bool,
+    use_inv_notation: bool,
+    allow_length_changing_stop_candidates: bool,
+    parser: hgvs.parser.Parser,
+    mapper: hgvs.assemblymapper.AssemblyMapper,
+    data_provider: Any,
+    transcript_cache: dict[str, tuple[str, str]],
+) -> list[dict[str, str]]:
+    positions = [pc.position for pc in protein_changes]
+    if len(positions) != len(set(positions)):
+        raise click.ClickException(
+            f"Duplicate amino acid positions in multivariant: {', '.join(str(p) for p in positions)}"
+        )
+
+    coding_sequence, reference_protein = get_coding_sequence_and_reference_protein(
+        data_provider, transcript_accession, transcript_cache
+    )
+
+    per_change_candidates: list[list[CandidateVariant]] = []
+    for protein_change in protein_changes:
+        if protein_change.reference_aa == "*":
+            raise click.ClickException("Stop-loss reverse translation is not supported by this script.")
+
+        is_deletion = protein_change.alternate_aa == ""
+
+        codon_cds_start_index = (protein_change.position - 1) * 3
+        codon_cds_end_index = codon_cds_start_index + 3
+        if codon_cds_end_index > len(coding_sequence):
+            raise click.ClickException(
+                f"Protein position {protein_change.position} exceeds coding sequence length for {transcript_accession}."
+            )
+
+        codon_sequence = coding_sequence[codon_cds_start_index:codon_cds_end_index]
+        reference_aa_from_codon = CODON_TO_AA.get(codon_sequence, "X")
+
+        if strict_ref_aa and reference_aa_from_codon != protein_change.reference_aa:
+            raise click.ClickException(
+                "Reference amino acid mismatch: "
+                f"HGVS p. requests {protein_change.reference_aa} at position {protein_change.position}, "
+                f"but transcript codon {codon_sequence} translates to {reference_aa_from_codon}."
+            )
+
+        codon_c_start = codon_cds_start_index + 1
+
+        if is_deletion:
+            candidates: list[CandidateVariant] = [
+                CandidateVariant(
+                    variant_type="del",
+                    hgvs_c=f"c.{codon_c_start}_{codon_c_start + 2}del",
+                )
+            ]
+        else:
+            candidates = enumerate_snv_candidates(
+                coding_sequence,
+                codon_sequence,
+                codon_c_start,
+                codon_cds_start_index,
+                reference_protein,
+                protein_change,
+            )
+            if include_indels:
+                candidates.extend(
+                    enumerate_indel_candidates(
+                        coding_sequence,
+                        codon_sequence,
+                        codon_c_start,
+                        codon_cds_start_index,
+                        reference_protein,
+                        protein_change,
+                        max_indel_size=max_indel_size,
+                        use_inv_notation=use_inv_notation,
+                        allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
+                    )
+                )
+
+        deduplicated = {cv.hgvs_c: cv for cv in candidates}
+        per_change_candidates.append([deduplicated[k] for k in sorted(deduplicated)])
+
+    rows: list[dict[str, str]] = []
+    for combination in product(*per_change_candidates):
+        sorted_combo = sorted(combination, key=lambda cv: c_variant_start_position(cv.hgvs_c))
+        variant_type = ";".join(cv.variant_type for cv in sorted_combo)
+        c_locals = [cv.hgvs_c[2:] for cv in sorted_combo]  # strip "c." prefix
+        hgvs_c = f"{transcript_accession}:c.[{';'.join(c_locals)}]"
+
+        g_variants: list[str] = []
+        g_failed = False
+        for cv in sorted_combo:
+            try:
+                hgvs_g = map_hgvs_c_to_hgvs_g(parser, mapper, transcript_accession, cv.hgvs_c)
+                if cv.component_substitutions:
+                    hgvs_g_multivariant = map_component_substitutions_to_g_multivariant(
+                        parser, mapper, transcript_accession, cv.component_substitutions
+                    )
+                    if hgvs_g_multivariant is not None:
+                        hgvs_g = hgvs_g_multivariant
+                g_variants.append(hgvs_g)
+            except Exception as exception:
+                click.echo(
+                    f"Warning: Failed to map {transcript_accession}:{cv.hgvs_c} to HGVS g. ({exception})",
+                    err=True,
+                )
+                g_failed = True
+                break
+
+        hgvs_g_allele = "" if g_failed else (build_g_allele(g_variants) or "")
+
+        rows.append(
+            {
+                "variant_type": variant_type,
+                "hgvs_c": hgvs_c,
+                "hgvs_g": hgvs_g_allele,
+            }
+        )
+
+    return rows
+
+
 def reverse_translate_hgvs_p(
     transcript_accession: str,
     hgvs_protein: str,
@@ -944,8 +1138,43 @@ def reverse_translate_hgvs_p(
     mapper: hgvs.assemblymapper.AssemblyMapper,
     data_provider: Any,
     transcript_cache: dict[str, tuple[str, str]],
+    max_aa_changes: int | None = None,
+    require_adjacent_aa_changes: bool = False,
 ) -> list[dict[str, str]]:
-    protein_change = parse_hgvs_protein_change(hgvs_protein)
+    protein_changes = parse_protein_multivariant(hgvs_protein)
+
+    if len(protein_changes) > 1:
+        if max_aa_changes is None:
+            raise click.ClickException(
+                f"Protein multivariant with {len(protein_changes)} amino acid changes is not enabled. "
+                "Use --max-aa-changes to allow multivariants."
+            )
+        if len(protein_changes) > max_aa_changes:
+            raise click.ClickException(
+                f"Protein multivariant has {len(protein_changes)} amino acid changes, "
+                f"exceeding the limit of {max_aa_changes}."
+            )
+        if require_adjacent_aa_changes and not are_aa_positions_consecutive(protein_changes):
+            positions_str = ", ".join(str(pc.position) for pc in protein_changes)
+            raise click.ClickException(
+                f"Protein multivariant positions [{positions_str}] are not consecutive "
+                "(required by --require-adjacent-aa-changes)."
+            )
+        return reverse_translate_multivariant_hgvs_p(
+            transcript_accession=transcript_accession,
+            protein_changes=protein_changes,
+            include_indels=include_indels,
+            max_indel_size=max_indel_size,
+            strict_ref_aa=strict_ref_aa,
+            use_inv_notation=use_inv_notation,
+            allow_length_changing_stop_candidates=allow_length_changing_stop_candidates,
+            parser=parser,
+            mapper=mapper,
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    protein_change = protein_changes[0]
 
     if protein_change.reference_aa == "*":
         raise click.ClickException("Stop-loss reverse translation is not supported by this script.")
@@ -1106,6 +1335,8 @@ def reverse_translate_batch_rows(
     skip_missing_hgvs_p: bool = True,
     raise_on_error: bool = False,
     error_rows: list[dict[str, str]] | None = None,
+    max_aa_changes: int | None = None,
+    require_adjacent_aa_changes: bool = False,
 ) -> list[dict[str, str]]:
     """
     Reverse-translate a sequence of input rows without invoking the CLI.
@@ -1156,6 +1387,8 @@ def reverse_translate_batch_rows(
                 mapper=mapper,
                 data_provider=data_provider,
                 transcript_cache=transcript_cache,
+                max_aa_changes=max_aa_changes,
+                require_adjacent_aa_changes=require_adjacent_aa_changes,
             )
         except Exception as exception:
             if raise_on_error:
@@ -1318,6 +1551,26 @@ def reverse_translate_batch_rows(
     ),
 )
 @click.option(
+    "--max-aa-changes",
+    "max_aa_changes",
+    default=None,
+    type=click.IntRange(min=1),
+    help=(
+        "Enable reverse translation of protein multivariants (e.g., p.[Arg175His;Gly245Asp]) "
+        "with at most N amino acid changes. Without this option, multivariants are skipped with an error. "
+        "Each substitution, stop-gain, and stop-loss counts as one change."
+    ),
+)
+@click.option(
+    "--require-adjacent-aa-changes",
+    is_flag=True,
+    default=False,
+    help=(
+        "For multivariants, require all changed amino acid positions to be consecutive (no gaps). "
+        "Non-consecutive multivariants are skipped with an error."
+    ),
+)
+@click.option(
     "--one-row-per-input",
     is_flag=True,
     default=False,
@@ -1370,6 +1623,8 @@ def main(
     auto_format_hgvs_p: bool,
     use_inv_notation: bool,
     allow_length_changing_stop_candidates: bool,
+    max_aa_changes: int | None,
+    require_adjacent_aa_changes: bool,
     one_row_per_input: bool,
     join_delimiter: str,
     csv_field_size_limit: int,
@@ -1472,6 +1727,8 @@ def main(
             mapper=mapper,
             data_provider=data_provider,
             transcript_cache=transcript_cache,
+            max_aa_changes=max_aa_changes,
+            require_adjacent_aa_changes=require_adjacent_aa_changes,
         )
 
         field_names = ["hgvs_p", "transcript", "variant_type", "hgvs_c", "hgvs_g"]
@@ -1746,6 +2003,8 @@ def main(
                     join_delimiter=join_delimiter,
                     skip_missing_hgvs_p=False,
                     raise_on_error=True,
+                    max_aa_changes=max_aa_changes,
+                    require_adjacent_aa_changes=require_adjacent_aa_changes,
                 )
             except Exception as exception:
                 error_message = (

@@ -1,5 +1,6 @@
 import csv
 from pathlib import Path
+import re
 from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
@@ -71,6 +72,451 @@ def test_resolve_transcript_from_refseq_protein_id_returns_none_when_fallback_qu
     resolved = rtv.resolve_transcript_from_refseq_protein_id(data_provider, "NP_000537.3")
 
     assert resolved is None
+
+
+# --- parse_protein_multivariant ---
+
+
+def test_parse_protein_multivariant_single_change_passthrough() -> None:
+    result = rtv.parse_protein_multivariant("p.Arg175His")
+    assert len(result) == 1
+    assert result[0].reference_aa == "R"
+    assert result[0].position == 175
+    assert result[0].alternate_aa == "H"
+
+
+def test_parse_protein_multivariant_bracket_notation() -> None:
+    result = rtv.parse_protein_multivariant("p.[Arg175His;Gly245Asp]")
+    assert len(result) == 2
+    assert result[0].reference_aa == "R"
+    assert result[0].position == 175
+    assert result[0].alternate_aa == "H"
+    assert result[1].reference_aa == "G"
+    assert result[1].position == 245
+    assert result[1].alternate_aa == "D"
+
+
+def test_parse_protein_multivariant_single_change_in_brackets() -> None:
+    result = rtv.parse_protein_multivariant("p.[Arg175His]")
+    assert len(result) == 1
+    assert result[0].position == 175
+
+
+def test_parse_protein_multivariant_with_accession_prefix() -> None:
+    result = rtv.parse_protein_multivariant("NP_000537.3:p.[Arg175His;Gly245Asp]")
+    assert len(result) == 2
+    assert result[0].position == 175
+    assert result[1].position == 245
+
+
+def test_parse_protein_multivariant_three_changes() -> None:
+    result = rtv.parse_protein_multivariant("p.[Arg175His;Gly245Asp;Val272Leu]")
+    assert len(result) == 3
+    assert [pc.position for pc in result] == [175, 245, 272]
+
+
+# --- are_aa_positions_consecutive ---
+
+
+def test_are_aa_positions_consecutive_single_change() -> None:
+    changes = rtv.parse_protein_multivariant("p.Arg175His")
+    assert rtv.are_aa_positions_consecutive(changes) is True
+
+
+def test_are_aa_positions_consecutive_adjacent_pair() -> None:
+    changes = rtv.parse_protein_multivariant("p.[Arg175His;Gly176Asp]")
+    assert rtv.are_aa_positions_consecutive(changes) is True
+
+
+def test_are_aa_positions_consecutive_non_consecutive() -> None:
+    changes = rtv.parse_protein_multivariant("p.[Arg175His;Gly245Asp]")
+    assert rtv.are_aa_positions_consecutive(changes) is False
+
+
+def test_are_aa_positions_consecutive_gap_of_two() -> None:
+    changes = rtv.parse_protein_multivariant("p.[Arg175His;Gly177Asp]")
+    assert rtv.are_aa_positions_consecutive(changes) is False
+
+
+def test_are_aa_positions_consecutive_three_consecutive() -> None:
+    changes = rtv.parse_protein_multivariant("p.[Arg175His;Gly176Asp;Val177Leu]")
+    assert rtv.are_aa_positions_consecutive(changes) is True
+
+
+def test_are_aa_positions_consecutive_three_with_gap() -> None:
+    changes = rtv.parse_protein_multivariant("p.[Arg175His;Gly176Asp;Val178Leu]")
+    assert rtv.are_aa_positions_consecutive(changes) is False
+
+
+# --- build_g_allele ---
+
+
+def test_build_g_allele_combines_two_snvs_sorted_by_position() -> None:
+    result = rtv.build_g_allele(["NC_000017.11:g.7670610C>T", "NC_000017.11:g.7669690G>C"])
+    assert result == "NC_000017.11:g.[7669690G>C;7670610C>T]"
+
+
+def test_build_g_allele_returns_single_variant_unchanged() -> None:
+    result = rtv.build_g_allele(["NC_000017.11:g.7670610C>T"])
+    assert result == "NC_000017.11:g.7670610C>T"
+
+
+def test_build_g_allele_returns_none_for_empty_list() -> None:
+    assert rtv.build_g_allele([]) is None
+
+
+def test_build_g_allele_returns_none_for_mixed_accessions() -> None:
+    result = rtv.build_g_allele(["NC_000017.11:g.100A>G", "NC_000001.11:g.200C>T"])
+    assert result is None
+
+
+def test_build_g_allele_returns_none_for_empty_component() -> None:
+    result = rtv.build_g_allele(["NC_000017.11:g.100A>G", ""])
+    assert result is None
+
+
+def test_build_g_allele_flattens_nested_bracketed_component() -> None:
+    result = rtv.build_g_allele(
+        [
+            "NC_000017.11:g.[7669690G>C;7670610C>T]",
+            "NC_000017.11:g.8000000A>G",
+        ]
+    )
+    assert result == "NC_000017.11:g.[7669690G>C;7670610C>T;8000000A>G]"
+
+
+def test_build_g_allele_handles_range_variants() -> None:
+    result = rtv.build_g_allele(["NC_000017.11:g.100_102delinsTGG", "NC_000017.11:g.200A>G"])
+    assert result == "NC_000017.11:g.[100_102delinsTGG;200A>G]"
+
+
+# --- multivariant reverse translation ---
+
+
+def test_reverse_translate_hgvs_p_rejects_multivariant_when_max_aa_changes_not_set() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 9}
+    data_provider.get_seq.return_value = "CGGGGTATT"  # Arg, Gly, Ile
+
+    import click
+
+    with pytest.raises(click.ClickException, match="not enabled"):
+        rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Arg1His;Gly2Asp]",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache={},
+            max_aa_changes=None,
+        )
+
+
+def test_reverse_translate_hgvs_p_rejects_multivariant_exceeding_limit() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 9}
+    data_provider.get_seq.return_value = "CGGGGTATT"
+
+    import click
+
+    with pytest.raises(click.ClickException, match="exceeding the limit of 1"):
+        rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Arg1His;Gly2Asp]",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache={},
+            max_aa_changes=1,
+        )
+
+
+def test_reverse_translate_hgvs_p_rejects_non_consecutive_multivariant_when_required() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 9}
+    data_provider.get_seq.return_value = "CGGGGTATT"
+
+    import click
+
+    with pytest.raises(click.ClickException, match="not consecutive"):
+        rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Arg1His;Ile3Val]",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache={},
+            max_aa_changes=2,
+            require_adjacent_aa_changes=True,
+        )
+
+
+def test_reverse_translate_hgvs_p_rejects_duplicate_positions_in_multivariant() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 9}
+    data_provider.get_seq.return_value = "CGGGGTATT"
+
+    import click
+
+    with pytest.raises(click.ClickException, match="Duplicate amino acid positions"):
+        rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Arg1His;Arg1Asp]",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache={},
+            max_aa_changes=2,
+        )
+
+
+def test_reverse_translate_hgvs_p_multivariant_produces_cartesian_product_rows() -> None:
+    # ATG = Met (pos 1), GCT = Ala (pos 2)
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    data_provider.get_seq.return_value = "ATGGCT"
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Met1Val;Ala2Gly]",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+            max_aa_changes=2,
+        )
+
+    # Met→Val: c.1A>G (only one SNV candidate from ATG)
+    # Ala→Gly: c.4G>C, c.5C>G, c.6T>C are the SNV candidates from GCT→GGN
+    # Each combination should produce one row
+    assert len(rows) >= 1
+    assert all(";" in row["variant_type"] for row in rows)
+    assert all(row["hgvs_c"].startswith("NM_TEST.1:c.[") for row in rows)
+    assert all(row["hgvs_c"].endswith("]") for row in rows)
+    # Every row should include the Met1Val component (c.1A>G)
+    assert all("1A>G" in row["hgvs_c"] for row in rows)
+
+
+def test_reverse_translate_hgvs_p_multivariant_hgvs_c_components_sorted_by_position() -> None:
+    # Verify that the first-listed change in the allele is the lower c. position
+    # regardless of which protein change comes first in the input
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 9}
+    data_provider.get_seq.return_value = "ATGGCTATG"  # Met, Ala, Met
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Met3Val;Met1Leu]",  # pos 3 listed first
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+            max_aa_changes=2,
+        )
+
+    # All alleles should have c.1 component before c.7 component
+    for row in rows:
+        inner = row["hgvs_c"].split(":c.[")[1].rstrip("]")
+        parts = inner.split(";")
+        positions = [int(re.match(r"(\d+)", p).group(1)) for p in parts]
+        assert positions == sorted(positions), f"Components not sorted in {row['hgvs_c']}"
+
+
+def test_reverse_translate_hgvs_p_multivariant_builds_combined_g_allele() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    data_provider.get_seq.return_value = "ATGGCT"  # Met, Ala
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    # GCT (Ala at pos 2): the only SNV giving Ser is c.4G>T (GCT→TCT)
+    def mocked_map(parser, mapper, tx, hgvs_c):
+        if hgvs_c == "c.1A>G":
+            return "NC_000017.11:g.7670610T>C"
+        if hgvs_c == "c.4G>T":
+            return "NC_000017.11:g.7669690G>C"
+        return f"GENOMIC:{tx}:{hgvs_c}"
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=mocked_map,
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Met1Val;Ala2Ser]",
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+            max_aa_changes=2,
+        )
+
+    # The row for c.[1A>G;4G>T] should produce a combined g. allele
+    target_row = next((r for r in rows if "1A>G" in r["hgvs_c"] and "4G>T" in r["hgvs_c"]), None)
+    assert target_row is not None
+    assert target_row["hgvs_g"] == "NC_000017.11:g.[7669690G>C;7670610T>C]"
+
+
+def test_reverse_translate_hgvs_p_adjacent_multivariant_passes_consecutive_check() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}
+    data_provider.get_seq.return_value = "ATGGCT"
+
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: f"GENOMIC:{tx}:{hgvs_c}",
+    ):
+        rows = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.[Met1Val;Ala2Gly]",  # positions 1 and 2 are consecutive
+            include_indels=False,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache={},
+            max_aa_changes=2,
+            require_adjacent_aa_changes=True,
+        )
+
+    assert len(rows) >= 1
+
+
+# --- CLI integration ---
+
+
+def test_cli_rejects_multivariant_without_max_aa_changes(runner: CliRunner) -> None:
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+        patch(
+            "src.scripts.reverse_translate_variants.reverse_translate_hgvs_p",
+            side_effect=__import__("click").ClickException("Protein multivariant with 2 amino acid changes is not enabled."),
+        ),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--transcript",
+                "NM_TEST.1",
+                "--hgvs-p",
+                "p.[Arg175His;Gly245Asp]",
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert "not enabled" in result.output
+
+
+def test_cli_processes_multivariant_with_max_aa_changes(runner: CliRunner, tmp_path: Path) -> None:
+    input_path = tmp_path / "input.tsv"
+    output_path = tmp_path / "output.tsv"
+    errors_path = tmp_path / "errors.tsv"
+
+    write_tsv(
+        input_path,
+        rows=[
+            {"transcript": "NM_A.1", "hgvs_p": "p.[Arg2His;Gly3Asp]"},
+            {"transcript": "NM_B.1", "hgvs_p": "p.[Arg2His;Gly3Asp;Val4Leu]"},  # 3 changes, exceeds limit of 2
+        ],
+        fieldnames=["transcript", "hgvs_p"],
+    )
+
+    def mocked_reverse_translate(**kwargs):
+        if kwargs["hgvs_protein"] == "p.[Arg2His;Gly3Asp]":
+            return [
+                {
+                    "variant_type": "snv;snv",
+                    "hgvs_c": f"{kwargs['transcript_accession']}:c.[10A>G;13G>T]",
+                    "hgvs_g": "NC_000001.11:g.[100A>G;130G>T]",
+                }
+            ]
+        raise __import__("click").ClickException("Protein multivariant has 3 amino acid changes, exceeding the limit of 2.")
+
+    with (
+        patch("src.scripts.reverse_translate_variants.hgvs.dataproviders.uta.connect", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.hgvs.assemblymapper.AssemblyMapper", return_value=Mock()),
+        patch("src.scripts.reverse_translate_variants.reverse_translate_hgvs_p", side_effect=mocked_reverse_translate),
+    ):
+        result = runner.invoke(
+            rtv.main,
+            [
+                "--input",
+                str(input_path),
+                "--max-aa-changes",
+                "2",
+                "--output",
+                str(output_path),
+                "--errors",
+                str(errors_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    with output_path.open("r", newline="") as handle:
+        output_rows = list(csv.DictReader(handle, delimiter="\t"))
+
+    assert len(output_rows) == 2
+    assert output_rows[0]["hgvs_c"] == "NM_A.1:c.[10A>G;13G>T]"
+    assert output_rows[0]["variant_type"] == "snv;snv"
+    assert output_rows[1]["hgvs_c"] == ""  # exceeded limit → error row
+
+    with errors_path.open("r", newline="") as handle:
+        error_rows = list(csv.DictReader(handle, delimiter="\t"))
+
+    assert len(error_rows) == 1
+    assert "exceeding the limit" in error_rows[0]["error"]
 
 
 def test_build_nonadjacent_g_multivariant_returns_semicolon_joined_allele() -> None:

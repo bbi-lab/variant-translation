@@ -249,6 +249,10 @@ with open("output.tsv", "w", newline="") as out_handle:
    reverse-translation error
 - `error_rows`: optional list to collect rows that encountered errors; each entry includes the same
    output columns plus an `error` message
+- `max_aa_changes`: default `None` (multivariants not allowed); set to an integer to enable and limit
+   multivariant inputs (same as `--max-aa-changes`)
+- `require_adjacent_aa_changes`: default `False`; set `True` to enforce consecutive positions in
+   multivariants (same as `--require-adjacent-aa-changes`)
 
 Useful functions:
 - `reverse_translate_hgvs_p(...)`: core reverse-translation function returning candidate rows with
@@ -351,7 +355,7 @@ python -m src.scripts.reverse_translate_variants --transcript NM_000546.6 --hgvs
 
 **Supported protein HGVS inputs**
 
-This tool currently accepts **single-amino-acid changes at one position**:
+This tool accepts **single-amino-acid changes at one position**:
 
 - missense/substitution, e.g. `p.Arg175His`
 - synonymous, e.g. `p.Arg175=`
@@ -367,17 +371,50 @@ insertions, deletions, `delins`, or `inv` candidates **that produce one of the
 supported protein outcomes above**. That option does **not** mean the input
 protein HGVS can itself be an arbitrary protein indel notation.
 
+**Protein multivariants**
+
+Changes at multiple amino acid positions can be expressed using HGVS allele
+notation and processed with `--max-aa-changes`:
+
+```bash
+python -m src.scripts.reverse_translate_variants \
+   --transcript NM_000546.6 \
+   --hgvs-p "p.[Arg175His;Gly245Asp]" \
+   --max-aa-changes 2
+```
+
+Multivariant input uses the HGVS allele syntax `p.[change1;change2;...]`. An
+optional protein accession prefix is also supported, e.g.
+`NP_000537.3:p.[Arg175His;Gly245Asp]`. Each component must be a supported
+single-amino-acid change; each substitution, stop-gain, and stop-loss counts
+as one change toward the `--max-aa-changes` limit.
+
+The tool enumerates DNA candidates independently for each amino acid change and
+returns their Cartesian product. Each output row represents one combination,
+with `hgvs_c` and `hgvs_g` in HGVS allele bracket notation:
+
+```
+variant_type    hgvs_c                                  hgvs_g
+snv;snv         NM_000546.6:c.[524G>A;817G>T]           NC_000017.11:g.[7669690G>C;7670610T>G]
+```
+
+Without `--max-aa-changes`, multivariants are skipped with an error. To also
+require all changed positions to be consecutive (no positional gaps), add
+`--require-adjacent-aa-changes`.
+
+> **Note:** the Cartesian product can be large when many candidates exist per
+> change, especially with `--include-indels`. Use `--one-row-per-input` to
+> join all combinations into a single output row per input variant.
+
 **Not currently supported**
 
-The reverse-translation parser does not currently handle broader protein HGVS
-classes such as:
+The reverse-translation parser does not handle broader protein HGVS classes such as:
 
 - single-amino-acid insertions
 - multi-residue deletions, insertions, duplications, or `delins`
 - frameshifts (for example `fs` forms)
 - extensions / stop-loss forms (for example `ext*?`); note that plain stop-loss
    requests with `*` as the reference amino acid are explicitly rejected
-- complex protein expressions spanning more than one amino-acid position
 
 For those cases, the script will either reject the input as unparseable or, for
 stop-loss requests, report that the variant type is not supported.
@@ -394,6 +431,9 @@ stop-loss requests, report that the variant type is not supported.
 - `--include-indels`: Include codon-local insertion/deletion/delins candidates
 - `--use-inv-notation`: Express eligible reverse-complement delins as HGVS `inv` variants
 - `--substitutions-and-delins-only`: For premature stops, suppress length-changing insertion/deletion candidates
+- `--max-aa-changes N`: Enable protein multivariant support; accept inputs with at most N amino acid changes.
+   Without this option, any multivariant input (e.g. `p.[Arg175His;Gly245Asp]`) is skipped with an error.
+- `--require-adjacent-aa-changes`: For multivariants, require all changed positions to be consecutive (no positional gaps)
 - `--skip`: Batch mode only; skip the first N input rows after the header
 - `--max-indel-size`: Maximum insertion/deletion size in nucleotides (1-3)
 - `--limit`: Batch mode only; process at most the first N input rows
