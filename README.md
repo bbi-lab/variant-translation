@@ -839,3 +839,13 @@ Use TestPyPI to validate packaging and installation without publishing to the ma
    ```bash
    pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple variant-translation
    ```
+
+## License
+
+MIT License, Copyright (c) 2026 Jeremy Stone. See [LICENSE](LICENSE) for the full text.
+
+## Citation
+
+If you use this software, please cite it using the metadata in
+[CITATION.cff](CITATION.cff) (also available via GitHub's "Cite this
+repository" button).

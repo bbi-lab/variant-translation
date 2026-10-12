@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: variant-translation
+abstract: >-
+  Python and CLI tools for translating and comparing representations of
+  genetic variants, including reverse-translation of protein-level HGVS
+  variants (p.) into coding (c.) and genomic (g.) HGVS notation.
+authors:
+  - family-names: Stone
+    given-names: Jeremy
+    email: 74574922+jstone-dev@users.noreply.github.com
+repository-code: "https://github.com/bbi-lab/variant-translation"
+url: "https://github.com/bbi-lab/variant-translation"
+license: MIT
+version: 1.2.0
