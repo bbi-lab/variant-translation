@@ -753,6 +753,55 @@ def test_reverse_translate_can_emit_inv_for_minimized_two_nt_inversion() -> None
     assert not any(row["hgvs_c"] == "NM_TEST.1:c.2_3delinsAG" for row in rows)
 
 
+def test_apply_inv_notation_to_hgvs_g_converts_delins_to_inv() -> None:
+    assert rtv.apply_inv_notation_to_hgvs_g("NC_000001.11:g.100_102delinsAGC") == "NC_000001.11:g.100_102inv"
+    assert rtv.apply_inv_notation_to_hgvs_g("NC_000001.11:g.100_102inv") == "NC_000001.11:g.100_102inv"
+    assert rtv.apply_inv_notation_to_hgvs_g("NC_000001.11:g.100A>T") == "NC_000001.11:g.100A>T"
+
+
+def test_reverse_translate_inv_notation_applies_to_hgvs_g() -> None:
+    data_provider = Mock()
+    data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 3}
+    data_provider.get_seq.return_value = "GCT"  # Ala codon; reverse complement is AGC (Ser)
+
+    transcript_cache: dict[str, tuple[str, str]] = {}
+
+    # Simulate the real hgvs library returning a g. delins even when c. is inv
+    with patch(
+        "src.scripts.reverse_translate_variants.map_hgvs_c_to_hgvs_g",
+        side_effect=lambda parser, mapper, tx, hgvs_c: "NC_000001.11:g.100_102delinsAGC",
+    ):
+        rows_inv = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Ala1Ser",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=True,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+        rows_no_inv = rtv.reverse_translate_hgvs_p(
+            transcript_accession="NM_TEST.1",
+            hgvs_protein="p.Ala1Ser",
+            include_indels=True,
+            max_indel_size=3,
+            strict_ref_aa=True,
+            use_inv_notation=False,
+            allow_length_changing_stop_candidates=True,
+            parser=Mock(),
+            mapper=Mock(),
+            data_provider=data_provider,
+            transcript_cache=transcript_cache,
+        )
+
+    assert any(row["variant_type"] == "inv" and row["hgvs_g"] == "NC_000001.11:g.100_102inv" for row in rows_inv)
+    assert not any(row["hgvs_g"] == "NC_000001.11:g.100_102inv" for row in rows_no_inv)
+
+
 def test_reverse_translate_premature_stop_includes_length_changing_candidates_by_default() -> None:
     insertion_data_provider = Mock()
     insertion_data_provider.get_tx_identity_info.return_value = {"cds_start_i": 0, "cds_end_i": 6}

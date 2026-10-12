@@ -690,6 +690,7 @@ def map_component_substitutions_to_g_multivariant(
 
 HGVS_G_ALLELE_INNER_RE = re.compile(r"^(?P<ac>[^:]+):g\.\[(?P<parts>.+)\]$")
 HGVS_G_SINGLE_VARIANT_RE = re.compile(r"^(?P<ac>[^:]+):g\.(?P<part>[^\[].+)$")
+HGVS_G_DELINS_RE = re.compile(r"^(?P<ac>[^:]+):g\.(?P<start>\d+)_(?P<end>\d+)delins[ACGT]+$")
 
 
 def flatten_g_variant_parts(hgvs_g: str) -> tuple[str, list[str]] | None:
@@ -731,6 +732,14 @@ def build_g_allele(g_variants: list[str]) -> str | None:
         return None
     sorted_parts = sorted(all_parts, key=g_part_start_position)
     return f"{accession}:g.[{';'.join(sorted_parts)}]"
+
+
+def apply_inv_notation_to_hgvs_g(hgvs_g: str) -> str:
+    """Convert a g. delins to g. inv notation. Returns the original string if it is not a single-range delins."""
+    match = HGVS_G_DELINS_RE.match(hgvs_g)
+    if match is None:
+        return hgvs_g
+    return f"{match.group('ac')}:g.{match.group('start')}_{match.group('end')}inv"
 
 
 def c_variant_start_position(hgvs_c_local: str) -> int:
@@ -1104,6 +1113,8 @@ def reverse_translate_multivariant_hgvs_p(
                     )
                     if hgvs_g_multivariant is not None:
                         hgvs_g = hgvs_g_multivariant
+                if use_inv_notation and cv.variant_type == "inv":
+                    hgvs_g = apply_inv_notation_to_hgvs_g(hgvs_g)
                 g_variants.append(hgvs_g)
             except Exception as exception:
                 click.echo(
@@ -1263,6 +1274,9 @@ def reverse_translate_hgvs_p(
                 )
                 if hgvs_g_multivariant is not None:
                     hgvs_g = hgvs_g_multivariant
+
+            if use_inv_notation and candidate_variant.variant_type == "inv":
+                hgvs_g = apply_inv_notation_to_hgvs_g(hgvs_g)
         except Exception as exception:
             click.echo(
                 f"Warning: Failed to map {transcript_accession}:{candidate_variant.hgvs_c} to HGVS g. ({exception})",
